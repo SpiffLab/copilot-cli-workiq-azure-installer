@@ -32,6 +32,10 @@
 .PARAMETER KeepAzure
     Do not uninstall Azure CLI (az).
 
+.PARAMETER KeepCopilot
+    Do not uninstall GitHub Copilot CLI (and skip scrubbing its portable
+    leftovers under %LOCALAPPDATA%\Microsoft\WinGet\Packages / Links).
+
 .PARAMETER KeepWorkIQConfig
     Do not remove the WorkIQ entry from the Copilot CLI MCP config.
 
@@ -39,6 +43,10 @@
     Do not attempt to relaunch elevated. Useful for CI or when you know admin
     is not needed. Without this flag, a non-admin run will re-launch itself
     via UAC so MSI uninstalls (Node.js, Git, gh, az) can actually proceed.
+
+.PARAMETER Yes
+    Skip the interactive component picker and remove everything (respecting
+    any -Keep* flags). Useful for CI / unattended runs.
 
 .PARAMETER NoWait
     Skip the "Press Enter to close" pause at the end.
@@ -49,8 +57,10 @@ param(
     [switch]$KeepGit,
     [switch]$KeepGh,
     [switch]$KeepAzure,
+    [switch]$KeepCopilot,
     [switch]$KeepWorkIQConfig,
     [switch]$NoElevate,
+    [switch]$Yes,
     [switch]$NoWait
 )
 
@@ -220,6 +230,88 @@ function Remove-NpmPrefixFromUserPath {
     }
 }
 
+function Invoke-ComponentPicker {
+    # Interactive checklist. Defaults reflect current flags + detected state.
+    # Returns a hashtable of Keep* booleans.
+    $haveWinget = [bool](Get-Command winget -ErrorAction SilentlyContinue)
+
+    function Test-WingetInstalled {
+        param([string]$Id)
+        if (-not $haveWinget) { return $false }
+        $listed = winget list --id $Id --exact --accept-source-agreements 2>$null | Out-String
+        return ($listed -match [regex]::Escape($Id))
+    }
+
+    $workiqCfg = @(
+        (Join-Path $env:USERPROFILE '.copilot\mcp-config.json'),
+        (Join-Path $env:USERPROFILE '.copilot\mcp.json')
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    $copilotLeftover = Test-Path (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages')
+    $copilotLeftover = $copilotLeftover -and ((Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages') -Directory -Filter 'GitHub.Copilot_*' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0)
+
+    $items = @(
+        [pscustomobject]@{ Key='workiq'; Label='WorkIQ MCP server registration';     Detected=[bool]$workiqCfg;                        KeepFlag='KeepWorkIQConfig'; CurrentKeep=$KeepWorkIQConfig }
+        [pscustomobject]@{ Key='copilot';Label='GitHub Copilot CLI (winget + leftovers)'; Detected=((Test-WingetInstalled 'GitHub.Copilot') -or $copilotLeftover); KeepFlag='KeepCopilot';     CurrentKeep=$KeepCopilot }
+        [pscustomobject]@{ Key='az';     Label='Azure CLI';                           Detected=(Test-WingetInstalled 'Microsoft.AzureCLI'); KeepFlag='KeepAzure';       CurrentKeep=$KeepAzure }
+        [pscustomobject]@{ Key='gh';     Label='GitHub CLI (gh)';                     Detected=(Test-WingetInstalled 'GitHub.cli');        KeepFlag='KeepGh';          CurrentKeep=$KeepGh }
+        [pscustomobject]@{ Key='node';   Label='Node.js LTS';                         Detected=(Test-WingetInstalled 'OpenJS.NodeJS.LTS'); KeepFlag='KeepNode';        CurrentKeep=$KeepNode }
+        [pscustomobject]@{ Key='git';    Label='Git';                                 Detected=(Test-WingetInstalled 'Git.Git');           KeepFlag='KeepGit';         CurrentKeep=$KeepGit }
+    )
+
+    # Default "remove" state: remove if detected and not explicitly -Keep*'d.
+    $state = @{}
+    foreach ($it in $items) { $state[$it.Key] = ($it.Detected -and -not $it.CurrentKeep) }
+
+    $done = $false
+    while (-not $done) {
+        Write-Host ''
+        Write-Host 'Select components to remove:' -ForegroundColor White
+        Write-Host '  [x] = will be removed   [ ] = will be kept   (dim = not detected)' -ForegroundColor DarkGray
+        Write-Host ''
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $it = $items[$i]
+            $mark = if ($state[$it.Key]) { 'x' } else { ' ' }
+            $color = if ($it.Detected) { 'White' } else { 'DarkGray' }
+            $suffix = if (-not $it.Detected) { ' (not detected)' } else { '' }
+            Write-Host ("  {0}. [{1}] {2}{3}" -f ($i + 1), $mark, $it.Label, $suffix) -ForegroundColor $color
+        }
+        Write-Host ''
+        Write-Host '  [A] All   [N] None   [Enter] Proceed   [C] Cancel' -ForegroundColor Cyan
+        $choice = Read-Host 'Toggle by number, or pick an action'
+        if ($null -eq $choice) { $choice = '' }
+        $choice = $choice.Trim()
+
+        if ($choice -eq '' ) { $done = $true; break }
+        switch -Regex ($choice) {
+            '^[aA]$'       { foreach ($it in $items) { if ($it.Detected) { $state[$it.Key] = $true } } ; break }
+            '^[nN]$'       { foreach ($it in $items) { $state[$it.Key] = $false } ; break }
+            '^[cC]$'       { Write-Host 'Cancelled.' -ForegroundColor Yellow; exit 0 }
+            '^\d+$'        {
+                $n = [int]$choice
+                if ($n -ge 1 -and $n -le $items.Count) {
+                    $k = $items[$n - 1].Key
+                    $state[$k] = -not $state[$k]
+                } else {
+                    Write-Warn2 "Out of range: $n"
+                }
+            }
+            default        { Write-Warn2 "Unrecognized input: '$choice'" }
+        }
+    }
+
+    # Translate picker state back into Keep* flags.
+    $result = @{
+        KeepWorkIQConfig = -not $state['workiq']
+        KeepCopilot      = -not $state['copilot']
+        KeepAzure        = -not $state['az']
+        KeepGh           = -not $state['gh']
+        KeepNode         = -not $state['node']
+        KeepGit          = -not $state['git']
+    }
+    return $result
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -227,6 +319,24 @@ function Remove-NpmPrefixFromUserPath {
 Write-Host ''
 Write-Host 'Copilot CLI + WorkIQ + Azure CLI uninstaller' -ForegroundColor White
 Write-Host '--------------------------------------------' -ForegroundColor DarkGray
+
+# Interactive component picker. Runs before elevation so the user's choices
+# can be forwarded into the elevated child as -Keep* flags. Skipped when
+# -Yes is passed or when not running in an interactive console host.
+$interactive = (-not $Yes) -and ($Host.Name -eq 'ConsoleHost') -and [Environment]::UserInteractive
+if ($interactive) {
+    try {
+        $picked = Invoke-ComponentPicker
+        $KeepWorkIQConfig = [bool]$picked.KeepWorkIQConfig
+        $KeepCopilot      = [bool]$picked.KeepCopilot
+        $KeepAzure        = [bool]$picked.KeepAzure
+        $KeepGh           = [bool]$picked.KeepGh
+        $KeepNode         = [bool]$picked.KeepNode
+        $KeepGit          = [bool]$picked.KeepGit
+    } catch {
+        Write-Warn2 "Picker failed ($($_.Exception.Message)); falling back to default behaviour."
+    }
+}
 
 # Self-elevate so MSI uninstalls (Git, Node.js, gh, az) actually succeed.
 # When invoked via `irm ... | iex` the script has no $PSCommandPath, so
@@ -236,11 +346,12 @@ if (-not (Test-IsAdmin) -and -not $NoElevate) {
     Write-Info  'Relaunching elevated via UAC... (pass -NoElevate to skip)'
 
     # Forward the original switches so the elevated run matches user intent.
-    $forwarded = @()
+    $forwarded = @('-Yes')   # picker already ran pre-elevation; don't re-prompt
     if ($KeepNode)         { $forwarded += '-KeepNode' }
     if ($KeepGit)          { $forwarded += '-KeepGit' }
     if ($KeepGh)           { $forwarded += '-KeepGh' }
     if ($KeepAzure)        { $forwarded += '-KeepAzure' }
+    if ($KeepCopilot)      { $forwarded += '-KeepCopilot' }
     if ($KeepWorkIQConfig) { $forwarded += '-KeepWorkIQConfig' }
     if ($NoWait)           { $forwarded += '-NoWait' }
     $forwarded += '-NoElevate'   # prevent infinite elevation loop
@@ -283,7 +394,7 @@ Remove-NpmPrefixFromUserPath
 
 Write-Step 'winget uninstalls'
 if (Get-Command winget -ErrorAction SilentlyContinue) {
-    Uninstall-WingetPackage -Id 'GitHub.Copilot'     -Friendly 'GitHub Copilot CLI'
+    if ($KeepCopilot) { Write-Skip 'GitHub Copilot CLI kept (-KeepCopilot)' } else { Uninstall-WingetPackage -Id 'GitHub.Copilot' -Friendly 'GitHub Copilot CLI' }
     if ($KeepAzure)   { Write-Skip 'Azure CLI kept (-KeepAzure)' }     else { Uninstall-WingetPackage -Id 'Microsoft.AzureCLI'  -Friendly 'Azure CLI' }
     if ($KeepGh)      { Write-Skip 'GitHub CLI kept (-KeepGh)' }        else { Uninstall-WingetPackage -Id 'GitHub.cli'         -Friendly 'GitHub CLI' }
     if ($KeepNode)    { Write-Skip 'Node.js LTS kept (-KeepNode)' }     else { Uninstall-WingetPackage -Id 'OpenJS.NodeJS.LTS'  -Friendly 'Node.js LTS' }
@@ -291,7 +402,8 @@ if (Get-Command winget -ErrorAction SilentlyContinue) {
 }
 
 Write-Step 'Copilot CLI portable leftovers'
-Remove-CopilotPortableLeftovers
+if ($KeepCopilot) { Write-Skip 'Copilot leftovers kept (-KeepCopilot)' }
+else { Remove-CopilotPortableLeftovers }
 
 Write-Host "`n============================================" -ForegroundColor DarkGray
 Write-Host 'Uninstall summary'                                -ForegroundColor White
