@@ -28,15 +28,6 @@ of Windows. **You don't need to download anything** — it's already on your PC.
 5. Copy the command in the grey box below and paste it into that window
    (right-click inside the window to paste, or press **Ctrl+V**), then press **Enter**.
 
-> 📘 Microsoft has a walkthrough with screenshots here:
-> <https://learn.microsoft.com/en-us/powershell/scripting/windows-powershell/starting-windows-powershell>
-
-> ⚠️ **Heads up:** During install, Windows will pop up a **User Account Control (UAC)**
-> prompt asking *"Do you want to allow this app to make changes to your device?"*.
-> **Click Yes.** Sometimes Windows hides this prompt behind other windows —
-> if nothing seems to be happening, check your **taskbar** for a flashing blue-and-white
-> shield icon and click it to bring the prompt forward.
-
 ### Run this one command
 
 Open PowerShell (see above) and run:

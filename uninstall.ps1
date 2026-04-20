@@ -11,8 +11,9 @@
       - Removes leftover npm global @github/copilot from earlier attempts
       - Removes the npm prefix from User PATH if we previously added it
 
-    Self-elevates via UAC when not already running as admin so the MSI
-    uninstalls actually succeed (pass -NoElevate to skip).
+    When MSI uninstalls (Node.js, Git, gh, az) are triggered, winget will
+    pop its own "Windows Package Manager" UAC prompt per package. This
+    script no longer self-elevates the whole PowerShell session.
 
     One-liner:
         irm https://raw.githubusercontent.com/SpiffLab/copilot-cli-workiq-azure-installer/main/uninstall.ps1 | iex
@@ -40,9 +41,8 @@
     Do not remove the WorkIQ entry from the Copilot CLI MCP config.
 
 .PARAMETER NoElevate
-    Do not attempt to relaunch elevated. Useful for CI or when you know admin
-    is not needed. Without this flag, a non-admin run will re-launch itself
-    via UAC so MSI uninstalls (Node.js, Git, gh, az) can actually proceed.
+    Suppress the "UAC prompts incoming" heads-up banner. Kept for backward
+    compatibility; the script no longer self-elevates.
 
 .PARAMETER Yes
     Skip the interactive component picker and remove everything (respecting
@@ -224,9 +224,10 @@ function Uninstall-WingetPackage {
         return
     }
     Write-Info "Uninstalling $Friendly ($Id)..."
-    # Note: intentionally NOT using --disable-interactivity. Some packages
-    # (Azure CLI MSI, Git MSI) require admin; blocking UAC causes silent
-    # failures. We self-elevate in Main so UAC shouldn't pop again here.
+    # Note: intentionally NOT using --disable-interactivity. MSI uninstalls
+    # (Azure CLI, Git, Node.js, gh) need admin; letting winget pop its own
+    # "Windows Package Manager" UAC prompt per package is friendlier than a
+    # bare PowerShell elevation.
     $result = Invoke-WingetQuiet -Activity "Uninstalling $Friendly" -Arguments @(
         'uninstall', '--id', $Id, '--exact', '--silent', '--accept-source-agreements'
     )
@@ -513,55 +514,28 @@ if ($interactive) {
     }
 }
 
-# Self-elevate so MSI uninstalls (Git, Node.js, gh, az) actually succeed.
-# When invoked via `irm ... | iex` the script has no $PSCommandPath, so
-# we fall back to re-downloading from the same URL when elevation is needed.
+# UAC heads-up (no self-elevation; we let winget elevate per package, matching
+# the installer's behaviour). MSI uninstalls (Node, Git, gh, az) will each
+# trigger their own UAC prompt as "Windows Package Manager wants to make
+# changes" - friendlier wording than a bare PowerShell admin prompt.
 if (-not (Test-IsAdmin) -and -not $NoElevate) {
     Write-Host ''
     Write-Host '============================================================' -ForegroundColor Yellow
-    Write-Host '  UAC prompt incoming'                                         -ForegroundColor Yellow
-    Write-Host '  A Windows UAC dialog is about to open asking for admin'     -ForegroundColor Yellow
-    Write-Host '  permission. If you do not see it, check the taskbar -'      -ForegroundColor Yellow
-    Write-Host '  Windows sometimes puts it behind other windows.'            -ForegroundColor Yellow
-    Write-Host '  Click "Yes" to continue. MSI uninstalls (Node, Git, gh,'    -ForegroundColor Yellow
-    Write-Host '  az) require admin rights to run.'                           -ForegroundColor Yellow
+    Write-Host '  UAC prompts incoming (one per MSI tool)'                    -ForegroundColor Yellow
+    Write-Host ''                                                              -ForegroundColor Yellow
+    Write-Host '  Removing Node.js, Git, GitHub CLI, and Azure CLI each needs'-ForegroundColor Yellow
+    Write-Host '  admin permission. Windows will show a UAC prompt for each'  -ForegroundColor Yellow
+    Write-Host '  one asking:'                                                 -ForegroundColor Yellow
+    Write-Host '     "Windows Package Manager - Do you want to allow this'    -ForegroundColor Yellow
+    Write-Host '      app to make changes to your device?"'                   -ForegroundColor Yellow
+    Write-Host '  Click "Yes" each time.'                                     -ForegroundColor Yellow
+    Write-Host ''                                                              -ForegroundColor Yellow
+    Write-Host '  If you do not see a prompt, check the taskbar - Windows'    -ForegroundColor Yellow
+    Write-Host '  sometimes hides it behind other windows. Look for a'        -ForegroundColor Yellow
+    Write-Host '  flashing blue-and-white shield icon and click it to bring'  -ForegroundColor Yellow
+    Write-Host '  the prompt forward.'                                        -ForegroundColor Yellow
     Write-Host '============================================================' -ForegroundColor Yellow
     Write-Host ''
-    Write-Info 'Relaunching elevated via UAC... (pass -NoElevate to skip)'
-
-    # Forward the original switches so the elevated run matches user intent.
-    $forwarded = @('-Yes')   # picker already ran pre-elevation; don't re-prompt
-    if ($KeepNode)         { $forwarded += '-KeepNode' }
-    if ($KeepGit)          { $forwarded += '-KeepGit' }
-    if ($KeepGh)           { $forwarded += '-KeepGh' }
-    if ($KeepAzure)        { $forwarded += '-KeepAzure' }
-    if ($KeepCopilot)      { $forwarded += '-KeepCopilot' }
-    if ($KeepWorkIQConfig) { $forwarded += '-KeepWorkIQConfig' }
-    if ($NoWait)           { $forwarded += '-NoWait' }
-    $forwarded += '-NoElevate'   # prevent infinite elevation loop
-
-    try {
-        if ($PSCommandPath -and (Test-Path $PSCommandPath)) {
-            $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"") + $forwarded
-            Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -Wait
-        } else {
-            # Running via `irm | iex` — no file on disk. Stage to a temp .ps1
-            # and re-invoke so the elevated host can `-File` it cleanly.
-            $tempScript = Join-Path $env:TEMP ("copilot-cli-uninstaller-{0}.ps1" -f (Get-Date -Format 'yyyyMMddHHmmss'))
-            $url = 'https://raw.githubusercontent.com/SpiffLab/copilot-cli-workiq-azure-installer/main/uninstall.ps1'
-            Write-Info "Downloading uninstaller to $tempScript for elevated run..."
-            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tempScript
-            $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tempScript`"") + $forwarded
-            Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs -Wait
-        }
-        Write-Host ''
-        Write-Host 'Elevated uninstaller finished. See its window for details.' -ForegroundColor Green
-        try { Stop-Transcript | Out-Null } catch { }
-        return
-    } catch {
-        Write-Warn2 "Elevation failed or was cancelled: $($_.Exception.Message)"
-        Write-Warn2 'Continuing in non-elevated mode; MSI uninstalls will likely fail.'
-    }
 }
 
 if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
