@@ -196,81 +196,37 @@ function Install-WingetPackage {
 function Install-CopilotCli {
     Write-Step 'GitHub Copilot CLI'
 
-    # Resolve npm to its .cmd / .exe form to bypass PowerShell ExecutionPolicy
-    # (PS would otherwise pick up npm.ps1 and fail on restricted systems).
-    $npmCmd = Resolve-NativeCommand -Name 'npm'
-    if (-not $npmCmd) {
-        # Try common install paths directly.
-        foreach ($p in @(
-            "$env:ProgramFiles\nodejs\npm.cmd",
-            "${env:ProgramFiles(x86)}\nodejs\npm.cmd",
-            "$env:APPDATA\npm\npm.cmd"
-        )) { if (Test-Path $p) { $npmCmd = $p; break } }
+    # Already installed?
+    $existing = Resolve-NativeCommand -Name 'copilot'
+    if ($existing) {
+        $ver = (& $existing --version 2>&1 | Select-Object -First 1)
+        Write-Skip "Copilot CLI already present at $existing ($ver)"
+        $script:CopilotPath = $existing
+        return
     }
-    if (-not $npmCmd) {
-        throw "npm.cmd not found after installing Node.js. Open a new terminal and re-run, or install Node LTS manually."
-    }
-    Write-Info "Using npm: $npmCmd"
 
-    # Check for existing copilot shim (prefer .cmd to avoid ExecutionPolicy issues).
+    # Install via the official winget package. It's a portable zip published
+    # by GitHub, so no ExecutionPolicy or PATH surgery is needed.
+    Install-WingetPackage -Id 'GitHub.Copilot' -Friendly 'GitHub Copilot CLI' -ProbeCommand 'copilot'
+
     $copilotCmd = Resolve-NativeCommand -Name 'copilot'
+    if (-not $copilotCmd) {
+        # winget's portable packages register a links directory on PATH
+        # (typically %LOCALAPPDATA%\Microsoft\WinGet\Links). Make sure we pick
+        # it up in this session.
+        $linksDir = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'
+        if ((Test-Path $linksDir) -and ($env:Path -notlike "*$linksDir*")) {
+            $env:Path = "$linksDir;$env:Path"
+        }
+        $copilotCmd = Resolve-NativeCommand -Name 'copilot'
+    }
+
     if ($copilotCmd) {
         $ver = (& $copilotCmd --version 2>&1 | Select-Object -First 1)
-        Write-Skip "Copilot CLI already present at $copilotCmd ($ver)"
-        return
-    }
-
-    Write-Info 'npm install -g @github/copilot'
-    $npmOut = & $npmCmd install -g '@github/copilot' 2>&1
-    $npmExit = $LASTEXITCODE
-    $npmOut | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
-    if ($npmExit -ne 0) {
-        Write-Fail "npm install -g @github/copilot failed (exit $npmExit). See log: $script:LogPath"
-        if (-not $Force) { throw "Copilot CLI install failed." }
-        return
-    }
-
-    # Resolve npm global prefix (again via .cmd, not .ps1).
-    $npmPrefix = $null
-    try { $npmPrefix = (& $npmCmd config get prefix 2>$null | Select-Object -First 1).Trim() } catch { }
-
-    if ($npmPrefix -and (Test-Path $npmPrefix)) {
-        if ($env:Path -notlike "*$npmPrefix*") { $env:Path = "$npmPrefix;$env:Path" }
-
-        # Persist to User PATH so new shells see it.
-        try {
-            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-            if (-not $userPath) { $userPath = '' }
-            $segments = $userPath.Split(';') | Where-Object { $_ }
-            if ($segments -notcontains $npmPrefix) {
-                $newUserPath = if ($userPath) { "$userPath;$npmPrefix" } else { $npmPrefix }
-                [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
-                Write-Info "Added $npmPrefix to User PATH (takes effect in new terminals)."
-            }
-        } catch {
-            Write-Warn2 "Could not persist npm prefix to User PATH: $($_.Exception.Message)"
-        }
-    }
-
-    # Locate the produced shim, preferring .cmd (works under any ExecutionPolicy).
-    $copilotShim = $null
-    if ($npmPrefix) {
-        foreach ($name in 'copilot.cmd','copilot.exe','copilot.bat') {
-            $candidate = Join-Path $npmPrefix $name
-            if (Test-Path $candidate) { $copilotShim = $candidate; break }
-        }
-    }
-
-    if ($copilotShim) {
-        $ver = (& $copilotShim --version 2>&1 | Select-Object -First 1)
-        Write-Ok "Copilot CLI installed at $copilotShim ($ver)"
-        $script:CopilotPath = $copilotShim
-        if (-not (Resolve-NativeCommand -Name 'copilot')) {
-            Write-Warn2 'Not visible on PATH in THIS session (persisted for new terminals). Open a NEW PowerShell window, then run: copilot'
-        }
+        Write-Ok "Copilot CLI installed at $copilotCmd ($ver)"
+        $script:CopilotPath = $copilotCmd
     } else {
-        Write-Fail "npm reported success but 'copilot.cmd' shim not found under $npmPrefix. See log: $script:LogPath"
-        if (-not $Force) { throw "Copilot CLI install did not produce a usable binary." }
+        Write-Warn2 'Copilot CLI installed but not visible on PATH in this session. Open a NEW PowerShell window, then run: copilot'
     }
 }
 

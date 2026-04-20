@@ -17,14 +17,14 @@ That's it. The script will:
 
 1. Check pre-reqs (Windows, PowerShell 5.1+, `winget`).
 2. Install anything missing via `winget`:
-   - **Node.js LTS** — runtime for Copilot CLI and the WorkIQ MCP server (`npx`).
+   - **GitHub Copilot CLI** (`GitHub.Copilot`) — the official portable-zip package from GitHub.
+   - **Node.js LTS** — runtime for the WorkIQ MCP server (`npx -y @microsoft/workiq`).
    - **Git** — required for most Copilot CLI workflows.
    - **GitHub CLI (`gh`)** — used for authenticating your GitHub account so Copilot CLI can talk to GitHub. Also handy for creating repos, PRs, issues from the terminal.
    - **Azure CLI (`az`)** — for building and managing Azure resources.
-3. Install Copilot CLI: `npm install -g @github/copilot`.
-4. Register the WorkIQ MCP server with Copilot CLI.
-5. Run `gh auth login --web` and `az login` interactively.
-6. Print a summary and next steps.
+3. Register the WorkIQ MCP server with Copilot CLI.
+4. Run `gh auth login --web` and `az login` interactively.
+5. Print a summary and next steps.
 
 Anything already present is skipped — re-running is safe.
 
@@ -64,22 +64,17 @@ Try: *"What are my upcoming meetings this week?"* — that exercises WorkIQ.
   "Press Enter to close" — if that didn't happen, the host probably wasn't a
   normal PowerShell console (e.g., `cmd /c powershell -Command ...`
   auto-closes).
-- **`copilot` command not found in a new terminal.** The npm global bin
-  directory (usually `%APPDATA%\npm`) must be on `PATH`. The installer now
-  adds it to your **User** `PATH` persistently, so **closing and reopening**
-  your terminal should pick it up. If it still doesn't:
-  ```powershell
-  $prefix = (npm config get prefix)
-  [Environment]::SetEnvironmentVariable('Path', "$([Environment]::GetEnvironmentVariable('Path','User'));$prefix", 'User')
-  # then open a NEW PowerShell window
-  ```
-  Verify with: `Get-Command copilot` and `Test-Path (Join-Path (npm config get prefix) 'copilot.cmd')`.
+- **`copilot` command not found in a new terminal.** winget installs the
+  `GitHub.Copilot` portable package with a shim under
+  `%LOCALAPPDATA%\Microsoft\WinGet\Links`, which winget adds to User PATH
+  automatically. If it doesn't show up, open a new PowerShell window. If
+  still missing, verify the install: `winget list --id GitHub.Copilot`.
 - **PowerShell ExecutionPolicy / "running scripts is disabled on this system".**
   The `irm | iex` entry point is immune (code runs in memory, not from a
-  `.ps1` file). The installer also explicitly invokes `.cmd` / `.exe` shims
-  for `npm` and `copilot` so it works under the default `Restricted` and
-  `AllSigned` policies without any changes. You do **not** need
-  `Set-ExecutionPolicy`.
+  `.ps1` file). All tools installed by this script (`GitHub.Copilot`, `gh`,
+  `az`, `npx`) are `.exe` / `.cmd` / `.bat` binaries, so they run fine under
+  the default `Restricted` and `AllSigned` execution policies. You do **not**
+  need `Set-ExecutionPolicy`.
 - **`winget` not found.** Update "App Installer" from the Microsoft Store
   (Windows 10 1809+ and Windows 11 ship with winget).
 - **Execution policy errors.** `irm | iex` runs in-memory and usually isn't
@@ -97,9 +92,8 @@ Try: *"What are my upcoming meetings this week?"* — that exercises WorkIQ.
 
 ## What gets changed on your machine
 
-- `winget` packages: `OpenJS.NodeJS.LTS`, `Git.Git`, `GitHub.cli`,
-  `Microsoft.AzureCLI` (only if missing).
-- npm global package: `@github/copilot`.
+- `winget` packages: `GitHub.Copilot` (Copilot CLI), `OpenJS.NodeJS.LTS`,
+  `Git.Git`, `GitHub.cli`, `Microsoft.AzureCLI` (only if missing).
 - Copilot CLI MCP configuration: a `workiq` server entry, added either via
   `copilot mcp add` or by writing to `%USERPROFILE%\.copilot\mcp-config.json`.
 - Interactive sign-in tokens stored by `gh` and `az` in their usual locations.
