@@ -247,8 +247,24 @@ function Install-WingetPackage {
         '--disable-interactivity'
     ) -AllowFail:$Force.IsPresent
     Update-SessionPath
-    if ($code -eq 0) {
-        Write-Ok "$Friendly installed"
+
+    # winget occasionally returns non-zero exit codes (reboot-required, benign
+    # post-install warnings, transient source errors) even when the package was
+    # installed successfully. Re-verify by probing the binary, and check winget's
+    # own installed list as a secondary signal.
+    $verified = $false
+    if ($ProbeCommand -and (Test-CommandExists $ProbeCommand)) { $verified = $true }
+    if (-not $verified) {
+        $listedAfter = winget list --id $Id --exact --accept-source-agreements 2>$null | Out-String
+        if ($listedAfter -match [regex]::Escape($Id)) { $verified = $true }
+    }
+
+    if ($code -eq 0 -or $verified) {
+        if ($code -eq 0) {
+            Write-Ok "$Friendly installed"
+        } else {
+            Write-Ok "$Friendly installed (winget exit $code, but binary verified on PATH)"
+        }
         if ($ManifestKey) { Set-ManifestComponent -Key $ManifestKey -State 'installed' -Id $Id }
     } else {
         Write-Warn2 "$Friendly winget install exited $code"
