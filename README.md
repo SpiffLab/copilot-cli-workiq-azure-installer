@@ -17,10 +17,10 @@ That's it. The script will:
 
 1. Check pre-reqs (Windows, PowerShell 5.1+, `winget`).
 2. Install anything missing via `winget`:
-   - Node.js LTS
-   - Git
-   - GitHub CLI (`gh`)
-   - Azure CLI (`az`)
+   - **Node.js LTS** — runtime for Copilot CLI and the WorkIQ MCP server (`npx`).
+   - **Git** — required for most Copilot CLI workflows.
+   - **GitHub CLI (`gh`)** — used for authenticating your GitHub account so Copilot CLI can talk to GitHub. Also handy for creating repos, PRs, issues from the terminal.
+   - **Azure CLI (`az`)** — for building and managing Azure resources.
 3. Install Copilot CLI: `npm install -g @github/copilot`.
 4. Register the WorkIQ MCP server with Copilot CLI.
 5. Run `gh auth login --web` and `az login` interactively.
