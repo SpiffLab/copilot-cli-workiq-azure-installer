@@ -26,17 +26,28 @@
 
 .PARAMETER Force
     Continue past non-fatal errors where reasonable.
+
+.PARAMETER NoWait
+    Skip the final "Press Enter to close" pause. Useful for CI / unattended runs.
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipAuth,
     [switch]$SkipWorkIQ,
     [switch]$SkipAzure,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$NoWait
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# ---------------------------------------------------------------------------
+# Transcript log (so the install output survives a closing terminal)
+# ---------------------------------------------------------------------------
+
+$script:LogPath = Join-Path $env:TEMP ("copilot-cli-installer-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+try { Start-Transcript -Path $script:LogPath -Force | Out-Null } catch { }
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -170,22 +181,58 @@ function Install-CopilotCli {
     }
 
     Write-Info 'npm install -g @github/copilot'
-    $null = Invoke-External -File 'npm' -Arguments @('install', '-g', '@github/copilot')
-    Update-SessionPath
+    # Capture npm output so failures are visible in the transcript log.
+    $npmOut = & npm install -g '@github/copilot' 2>&1
+    $npmExit = $LASTEXITCODE
+    $npmOut | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+    if ($npmExit -ne 0) {
+        Write-Fail "npm install -g @github/copilot failed (exit $npmExit). See log: $script:LogPath"
+        if (-not $Force) { throw "Copilot CLI install failed." }
+        return
+    }
 
-    # npm global bin may not be on PATH in this session even after refresh;
-    # add it explicitly.
-    try {
-        $npmPrefix = (& npm config get prefix 2>$null).Trim()
-        if ($npmPrefix -and (Test-Path $npmPrefix) -and ($env:Path -notlike "*$npmPrefix*")) {
-            $env:Path = "$npmPrefix;$env:Path"
+    # Resolve npm global prefix and ensure its bin directory is on PATH for both
+    # the current session AND persistently (User scope) so new terminals see it.
+    $npmPrefix = $null
+    try { $npmPrefix = (& npm config get prefix 2>$null | Select-Object -First 1).Trim() } catch { }
+
+    if ($npmPrefix -and (Test-Path $npmPrefix)) {
+        # On Windows, `npm -g` installs shim .cmd files directly in the prefix folder.
+        if ($env:Path -notlike "*$npmPrefix*") { $env:Path = "$npmPrefix;$env:Path" }
+
+        # Persist to User PATH so new shells see it.
+        try {
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            if (-not $userPath) { $userPath = '' }
+            $segments = $userPath.Split(';') | Where-Object { $_ }
+            if ($segments -notcontains $npmPrefix) {
+                $newUserPath = if ($userPath) { "$userPath;$npmPrefix" } else { $npmPrefix }
+                [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+                Write-Info "Added $npmPrefix to User PATH (takes effect in new terminals)."
+            }
+        } catch {
+            Write-Warn2 "Could not persist npm prefix to User PATH: $($_.Exception.Message)"
         }
-    } catch { }
+    }
 
-    if (-not (Test-CommandExists 'copilot')) {
-        Write-Warn2 'Copilot CLI installed but not visible on PATH in this session. Open a new PowerShell window to use `copilot`.'
+    # Verify the binary is actually where we expect.
+    $copilotShim = $null
+    if ($npmPrefix) {
+        foreach ($name in 'copilot.cmd','copilot.ps1','copilot') {
+            $candidate = Join-Path $npmPrefix $name
+            if (Test-Path $candidate) { $copilotShim = $candidate; break }
+        }
+    }
+
+    if (Test-CommandExists 'copilot') {
+        $ver = (copilot --version 2>&1 | Select-Object -First 1)
+        Write-Ok "Copilot CLI installed ($ver)"
+    } elseif ($copilotShim) {
+        Write-Ok "Copilot CLI installed at $copilotShim"
+        Write-Warn2 'Not visible on PATH in THIS session — open a NEW PowerShell window, then run: copilot'
     } else {
-        Write-Ok 'Copilot CLI installed'
+        Write-Fail "npm reported success but 'copilot' shim not found under $npmPrefix. See log: $script:LogPath"
+        if (-not $Force) { throw "Copilot CLI install did not produce a usable binary." }
     }
 }
 
@@ -361,13 +408,32 @@ function Main {
     Write-Host 'WorkIQ note: first-time access to tenant data requires admin consent.'
     Write-Host 'See: https://github.com/microsoft/work-iq-mcp#readme' -ForegroundColor DarkCyan
     Write-Host ''
+    Write-Host "Transcript log: $script:LogPath" -ForegroundColor DarkCyan
+    Write-Host ''
 }
 
+$script:ExitCode = 0
 try {
     Main
 } catch {
     Write-Host ''
     Write-Host "Installer failed: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
-    exit 1
+    Write-Host ''
+    Write-Host "Transcript log: $script:LogPath" -ForegroundColor DarkCyan
+    $script:ExitCode = 1
+} finally {
+    try { Stop-Transcript | Out-Null } catch { }
 }
+
+# Keep the window open so the user can read the output. Only pause in an
+# interactive console host; skip for CI / piped / -NoWait runs.
+if (-not $NoWait -and $Host.Name -eq 'ConsoleHost' -and [Environment]::UserInteractive) {
+    try {
+        Write-Host ''
+        Write-Host 'Press Enter to close this window...' -ForegroundColor Yellow
+        [void](Read-Host)
+    } catch { }
+}
+
+if ($script:ExitCode -ne 0) { exit $script:ExitCode }

@@ -57,6 +57,23 @@ Try: *"What are my upcoming meetings this week?"* — that exercises WorkIQ.
 
 ## Troubleshooting
 
+- **The terminal closed before I could read the output.** Every run writes a
+  full transcript to `%TEMP%\copilot-cli-installer-YYYYMMDD-HHMMSS.log`. Open
+  it with: `notepad "$env:TEMP\copilot-cli-installer-*.log"` (grabs the
+  newest). The script also pauses at the end of every interactive run with
+  "Press Enter to close" — if that didn't happen, the host probably wasn't a
+  normal PowerShell console (e.g., `cmd /c powershell -Command ...`
+  auto-closes).
+- **`copilot` command not found in a new terminal.** The npm global bin
+  directory (usually `%APPDATA%\npm`) must be on `PATH`. The installer now
+  adds it to your **User** `PATH` persistently, so **closing and reopening**
+  your terminal should pick it up. If it still doesn't:
+  ```powershell
+  $prefix = (npm config get prefix)
+  [Environment]::SetEnvironmentVariable('Path', "$([Environment]::GetEnvironmentVariable('Path','User'));$prefix", 'User')
+  # then open a NEW PowerShell window
+  ```
+  Verify with: `Get-Command copilot` and `Test-Path (Join-Path (npm config get prefix) 'copilot.cmd')`.
 - **`winget` not found.** Update "App Installer" from the Microsoft Store
   (Windows 10 1809+ and Windows 11 ship with winget).
 - **Execution policy errors.** `irm | iex` runs in-memory and usually isn't
