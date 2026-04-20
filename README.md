@@ -10,7 +10,7 @@ and the [Azure CLI](https://learn.microsoft.com/cli/azure/).
 Open PowerShell and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/<owner>/copilot-cli-workiq-azure-installer/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/SpiffLab/copilot-cli-workiq-azure-installer/main/install.ps1 | iex
 ```
 
 That's it. The script will:
@@ -33,7 +33,7 @@ Anything already present is skipped — re-running is safe.
 Because `irm | iex` doesn't support script parameters, wrap it in a scriptblock:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/<owner>/copilot-cli-workiq-azure-installer/main/install.ps1))) -SkipAuth
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SpiffLab/copilot-cli-workiq-azure-installer/main/install.ps1))) -SkipAuth
 ```
 
 ### Flags
