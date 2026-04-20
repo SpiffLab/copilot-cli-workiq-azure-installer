@@ -65,6 +65,42 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # ---------------------------------------------------------------------------
+# Install manifest - tracks what the installer actually put on the machine
+# so the uninstaller can skip components that were already present.
+# ---------------------------------------------------------------------------
+
+$script:ManifestDir  = Join-Path $env:LOCALAPPDATA 'copilot-cli-workiq-azure-installer'
+$script:ManifestPath = Join-Path $script:ManifestDir 'manifest.json'
+$script:Manifest = [ordered]@{
+    version    = 1
+    createdAt  = (Get-Date).ToString('o')
+    components = [ordered]@{}
+}
+
+function Set-ManifestComponent {
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][ValidateSet('installed','already-present','skipped-by-user','failed','registered','already-registered')][string]$State,
+        [string]$Id
+    )
+    $entry = [ordered]@{ state = $State; at = (Get-Date).ToString('o') }
+    if ($Id) { $entry.id = $Id }
+    $script:Manifest.components[$Key] = $entry
+}
+
+function Save-Manifest {
+    try {
+        if (-not (Test-Path $script:ManifestDir)) {
+            New-Item -ItemType Directory -Force -Path $script:ManifestDir | Out-Null
+        }
+        ($script:Manifest | ConvertTo-Json -Depth 10) | Set-Content -Path $script:ManifestPath -Encoding UTF8
+        Write-Info "Install manifest written to $script:ManifestPath"
+    } catch {
+        Write-Warn2 "Could not write install manifest: $($_.Exception.Message)"
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Transcript log (so the install output survives a closing terminal)
 # ---------------------------------------------------------------------------
 
@@ -183,11 +219,13 @@ function Install-WingetPackage {
     param(
         [Parameter(Mandatory)][string]$Id,
         [Parameter(Mandatory)][string]$Friendly,
-        [string]$ProbeCommand
+        [string]$ProbeCommand,
+        [string]$ManifestKey   # component key for the install manifest
     )
 
     if ($ProbeCommand -and (Test-CommandExists $ProbeCommand)) {
         Write-Skip "$Friendly already present ($ProbeCommand on PATH)"
+        if ($ManifestKey) { Set-ManifestComponent -Key $ManifestKey -State 'already-present' -Id $Id }
         return
     }
 
@@ -195,12 +233,13 @@ function Install-WingetPackage {
     $listed = winget list --id $Id --exact --accept-source-agreements 2>$null | Out-String
     if ($listed -match [regex]::Escape($Id)) {
         Write-Skip "$Friendly already installed (winget: $Id)"
+        if ($ManifestKey) { Set-ManifestComponent -Key $ManifestKey -State 'already-present' -Id $Id }
         Update-SessionPath
         return
     }
 
     Write-Info "Installing $Friendly ($Id) via winget..."
-    $null = Invoke-External -File 'winget' -Arguments @(
+    $code = Invoke-External -File 'winget' -Arguments @(
         'install', '--id', $Id, '--exact',
         '--silent',
         '--accept-package-agreements',
@@ -208,7 +247,13 @@ function Install-WingetPackage {
         '--disable-interactivity'
     ) -AllowFail:$Force.IsPresent
     Update-SessionPath
-    Write-Ok "$Friendly installed"
+    if ($code -eq 0) {
+        Write-Ok "$Friendly installed"
+        if ($ManifestKey) { Set-ManifestComponent -Key $ManifestKey -State 'installed' -Id $Id }
+    } else {
+        Write-Warn2 "$Friendly winget install exited $code"
+        if ($ManifestKey) { Set-ManifestComponent -Key $ManifestKey -State 'failed' -Id $Id }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -224,12 +269,13 @@ function Install-CopilotCli {
         $ver = (& $existing --version 2>&1 | Select-Object -First 1)
         Write-Skip "Copilot CLI already present at $existing ($ver)"
         $script:CopilotPath = $existing
+        Set-ManifestComponent -Key 'copilot' -State 'already-present' -Id 'GitHub.Copilot'
         return
     }
 
     # Install via the official winget package. It's a portable zip published
     # by GitHub, so no ExecutionPolicy or PATH surgery is needed.
-    Install-WingetPackage -Id 'GitHub.Copilot' -Friendly 'GitHub Copilot CLI' -ProbeCommand 'copilot'
+    Install-WingetPackage -Id 'GitHub.Copilot' -Friendly 'GitHub Copilot CLI' -ProbeCommand 'copilot' -ManifestKey 'copilot'
 
     $copilotCmd = Resolve-NativeCommand -Name 'copilot'
     if (-not $copilotCmd) {
@@ -261,7 +307,29 @@ function Register-WorkIQMcp {
 
     if ($SkipWorkIQ) {
         Write-Skip 'WorkIQ registration skipped (-SkipWorkIQ)'
+        Set-ManifestComponent -Key 'workiq' -State 'skipped-by-user'
         return
+    }
+
+    # Detect an existing 'workiq' MCP registration so we don't claim
+    # ownership of something another installer / user added.
+    $preExisting = $false
+    $candidatePaths = @(
+        (Join-Path $env:USERPROFILE '.copilot\mcp-config.json'),
+        (Join-Path $env:USERPROFILE '.copilot\mcp.json')
+    )
+    foreach ($p in $candidatePaths) {
+        if (-not (Test-Path $p)) { continue }
+        try {
+            $raw = Get-Content -Raw -Path $p
+            if ($raw.Trim()) {
+                $obj = $raw | ConvertFrom-Json
+                if ($obj.PSObject.Properties.Name -contains 'mcpServers' -and $obj.mcpServers -and
+                    ($obj.mcpServers.PSObject.Properties.Name -contains 'workiq')) {
+                    $preExisting = $true; break
+                }
+            }
+        } catch { }
     }
 
     $cliOk = $false
@@ -286,6 +354,7 @@ function Register-WorkIQMcp {
 
     if ($cliOk) {
         Write-Ok 'WorkIQ MCP server registered via `copilot mcp add`'
+        Set-ManifestComponent -Key 'workiq' -State ($(if ($preExisting) { 'already-registered' } else { 'registered' }))
         return
     }
 
@@ -334,6 +403,7 @@ function Register-WorkIQMcp {
 
     ($config | ConvertTo-Json -Depth 10) | Set-Content -Path $configPath -Encoding UTF8
     Write-Ok "WorkIQ MCP server written to $configPath"
+    Set-ManifestComponent -Key 'workiq' -State ($(if ($preExisting) { 'already-registered' } else { 'registered' }))
 }
 
 # ---------------------------------------------------------------------------
@@ -499,23 +569,28 @@ function Main {
     Write-Host ''
 
     Write-Step 'Prerequisites (winget)'
-    if ($SkipNode) { Write-Skip 'Node.js LTS skipped (-SkipNode)' }
-    else { Install-WingetPackage -Id 'OpenJS.NodeJS.LTS' -Friendly 'Node.js LTS' -ProbeCommand 'node' }
-    if ($SkipGit)  { Write-Skip 'Git skipped (-SkipGit)' }
-    else { Install-WingetPackage -Id 'Git.Git'           -Friendly 'Git'          -ProbeCommand 'git' }
-    if ($SkipGh)   { Write-Skip 'GitHub CLI skipped (-SkipGh)' }
-    else { Install-WingetPackage -Id 'GitHub.cli'        -Friendly 'GitHub CLI'   -ProbeCommand 'gh' }
+    if ($SkipNode) { Write-Skip 'Node.js LTS skipped (-SkipNode)'; Set-ManifestComponent -Key 'node' -State 'skipped-by-user' -Id 'OpenJS.NodeJS.LTS' }
+    else { Install-WingetPackage -Id 'OpenJS.NodeJS.LTS' -Friendly 'Node.js LTS' -ProbeCommand 'node' -ManifestKey 'node' }
+    if ($SkipGit)  { Write-Skip 'Git skipped (-SkipGit)'; Set-ManifestComponent -Key 'git' -State 'skipped-by-user' -Id 'Git.Git' }
+    else { Install-WingetPackage -Id 'Git.Git'           -Friendly 'Git'          -ProbeCommand 'git'  -ManifestKey 'git' }
+    if ($SkipGh)   { Write-Skip 'GitHub CLI skipped (-SkipGh)'; Set-ManifestComponent -Key 'gh' -State 'skipped-by-user' -Id 'GitHub.cli' }
+    else { Install-WingetPackage -Id 'GitHub.cli'        -Friendly 'GitHub CLI'   -ProbeCommand 'gh'   -ManifestKey 'gh' }
     if ($SkipAzure) {
         Write-Skip 'Azure CLI skipped (-SkipAzure)'
+        Set-ManifestComponent -Key 'az' -State 'skipped-by-user' -Id 'Microsoft.AzureCLI'
     } else {
-        Install-WingetPackage -Id 'Microsoft.AzureCLI' -Friendly 'Azure CLI' -ProbeCommand 'az'
+        Install-WingetPackage -Id 'Microsoft.AzureCLI' -Friendly 'Azure CLI' -ProbeCommand 'az' -ManifestKey 'az'
     }
 
-    if ($SkipCopilot) { Write-Skip 'GitHub Copilot CLI skipped (-SkipCopilot)' }
-    else { Install-CopilotCli }
+    if ($SkipCopilot) {
+        Write-Skip 'GitHub Copilot CLI skipped (-SkipCopilot)'
+        Set-ManifestComponent -Key 'copilot' -State 'skipped-by-user' -Id 'GitHub.Copilot'
+    } else { Install-CopilotCli }
 
     Register-WorkIQMcp
     Invoke-Auth
+
+    Save-Manifest
 
     # ---- Summary ----
     Write-Host "`n============================================" -ForegroundColor DarkGray

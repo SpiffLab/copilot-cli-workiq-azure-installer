@@ -70,6 +70,79 @@ Set-StrictMode -Version Latest
 $script:LogPath = Join-Path $env:TEMP ("copilot-cli-uninstaller-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 try { Start-Transcript -Path $script:LogPath -Force | Out-Null } catch { }
 
+# ---------------------------------------------------------------------------
+# Install manifest (written by install.ps1). Tells us which components the
+# installer actually put on the machine vs. which were already present so
+# we don't remove tools the user installed themselves before.
+# ---------------------------------------------------------------------------
+
+$script:ManifestDir  = Join-Path $env:LOCALAPPDATA 'copilot-cli-workiq-azure-installer'
+$script:ManifestPath = Join-Path $script:ManifestDir 'manifest.json'
+$script:Manifest     = $null   # hashtable of component -> @{state; id; at}
+
+function Get-ManifestState {
+    param([Parameter(Mandatory)][string]$Key)
+    if (-not $script:Manifest) { return $null }
+    if (-not $script:Manifest.ContainsKey($Key)) { return $null }
+    return $script:Manifest[$Key].state
+}
+
+function Remove-ManifestComponent {
+    param([Parameter(Mandatory)][string]$Key)
+    if (-not $script:Manifest) { return }
+    if ($script:Manifest.ContainsKey($Key)) { $script:Manifest.Remove($Key) }
+}
+
+function Load-Manifest {
+    if (-not (Test-Path $script:ManifestPath)) { return }
+    try {
+        $raw = Get-Content -Raw -Path $script:ManifestPath -ErrorAction Stop
+        if (-not $raw.Trim()) { return }
+        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+        $components = [ordered]@{}
+        if ($obj.PSObject.Properties.Name -contains 'components' -and $obj.components) {
+            $obj.components.PSObject.Properties | ForEach-Object {
+                $v = $_.Value
+                $entry = @{}
+                $v.PSObject.Properties | ForEach-Object { $entry[$_.Name] = $_.Value }
+                $components[$_.Name] = $entry
+            }
+        }
+        $script:Manifest = $components
+        Write-Info "Loaded install manifest: $script:ManifestPath"
+    } catch {
+        Write-Warn2 "Could not parse install manifest ($script:ManifestPath): $($_.Exception.Message)"
+    }
+}
+
+function Save-Manifest {
+    # Called at the end to persist / delete the manifest based on what's left.
+    try {
+        if (-not $script:Manifest -or $script:Manifest.Count -eq 0) {
+            if (Test-Path $script:ManifestPath) {
+                Remove-Item -LiteralPath $script:ManifestPath -Force -ErrorAction SilentlyContinue
+                # Clean up empty dir too.
+                if ((Test-Path $script:ManifestDir) -and -not (Get-ChildItem $script:ManifestDir -Force -ErrorAction SilentlyContinue)) {
+                    Remove-Item -LiteralPath $script:ManifestDir -Force -ErrorAction SilentlyContinue
+                }
+                Write-Info "Removed install manifest (all tracked components gone)"
+            }
+            return
+        }
+        if (-not (Test-Path $script:ManifestDir)) {
+            New-Item -ItemType Directory -Force -Path $script:ManifestDir | Out-Null
+        }
+        $out = [ordered]@{
+            version    = 1
+            updatedAt  = (Get-Date).ToString('o')
+            components = $script:Manifest
+        }
+        ($out | ConvertTo-Json -Depth 10) | Set-Content -Path $script:ManifestPath -Encoding UTF8
+    } catch {
+        Write-Warn2 "Could not update install manifest: $($_.Exception.Message)"
+    }
+}
+
 $script:Summary = [System.Collections.Generic.List[string]]::new()
 
 function Write-Step { param([string]$m) Write-Host "`n==> $m" -ForegroundColor Cyan }
@@ -90,7 +163,8 @@ function Uninstall-WingetPackage {
     param(
         [string]$Id,
         [string]$Friendly,
-        [string]$LeftoverHint   # optional message when winget has no record (e.g., Copilot portable files)
+        [string]$LeftoverHint,    # optional message when winget has no record (e.g., Copilot portable files)
+        [string]$ManifestKey       # remove this manifest component on successful uninstall
     )
     $listed = winget list --id $Id --exact --accept-source-agreements 2>$null | Out-String
     if ($listed -notmatch [regex]::Escape($Id)) {
@@ -99,6 +173,7 @@ function Uninstall-WingetPackage {
         } else {
             Write-Skip "$Friendly not installed (winget: $Id)"
         }
+        if ($ManifestKey) { Remove-ManifestComponent -Key $ManifestKey }
         return
     }
     Write-Info "Uninstalling $Friendly ($Id)..."
@@ -114,6 +189,7 @@ function Uninstall-WingetPackage {
     $after = winget list --id $Id --exact --accept-source-agreements 2>$null | Out-String
     if ($after -notmatch [regex]::Escape($Id)) {
         Write-Ok "$Friendly uninstalled"
+        if ($ManifestKey) { Remove-ManifestComponent -Key $ManifestKey }
     } elseif ($code -ne 0) {
         Write-Fail "$Friendly uninstall exited $code (still registered with winget)"
     } else {
@@ -183,6 +259,7 @@ function Remove-WorkIQMcpConfig {
             if ($changed) {
                 ($obj | ConvertTo-Json -Depth 10) | Set-Content -Path $p -Encoding UTF8
                 Write-Ok "Removed 'workiq' from $p"
+                Remove-ManifestComponent -Key 'workiq'
             } else {
                 Write-Skip "No 'workiq' entry in $p"
             }
@@ -267,44 +344,75 @@ function Invoke-ComponentPicker {
         [pscustomobject]@{ Key='git';    Label='Git';                                 Detected=(Test-WingetInstalled 'Git.Git');           KeepFlag='KeepGit';         CurrentKeep=$KeepGit }
     )
 
-    # Default "remove" state: remove if detected and not explicitly -Keep*'d.
+    # Default state rules (highest priority first):
+    #   1. If manifest says "already-present" or "already-registered": default KEEP
+    #      (the user had it before we ran; we should NOT remove it).
+    #   2. If user passed -Keep* for this item: KEEP.
+    #   3. Else if detected on the machine: REMOVE.
+    #   4. Else: do nothing (not detected).
     $state = @{}
-    foreach ($it in $items) { $state[$it.Key] = ($it.Detected -and -not $it.CurrentKeep) }
+    $manifestHeld = @{}   # keys we're defaulting to KEEP due to manifest history
+    foreach ($it in $items) {
+        $manifestState = Get-ManifestState -Key $it.Key
+        if ($manifestState -in @('already-present','already-registered')) {
+            $state[$it.Key] = $false
+            $manifestHeld[$it.Key] = $manifestState
+        } else {
+            $state[$it.Key] = ($it.Detected -and -not $it.CurrentKeep)
+        }
+    }
 
     $done = $false
     while (-not $done) {
         Write-Host ''
         Write-Host 'Select components to remove:' -ForegroundColor White
         Write-Host '  [x] = will be removed   [ ] = will be kept   (dim = not detected)' -ForegroundColor DarkGray
+        if ($manifestHeld.Count -gt 0) {
+            Write-Host '  (*) = was present before our installer ran; defaulted to KEEP' -ForegroundColor DarkGray
+        }
         Write-Host ''
         for ($i = 0; $i -lt $items.Count; $i++) {
             $it = $items[$i]
             $mark = if ($state[$it.Key]) { 'x' } else { ' ' }
             $color = if ($it.Detected) { 'White' } else { 'DarkGray' }
-            $suffix = if (-not $it.Detected) { ' (not detected)' } else { '' }
+            $suffix = ''
+            if ($manifestHeld.ContainsKey($it.Key)) { $suffix = ' (*)  pre-existing' ; $color = 'DarkYellow' }
+            elseif (-not $it.Detected) { $suffix = ' (not detected)' }
             Write-Host ("  {0}. [{1}] {2}{3}" -f ($i + 1), $mark, $it.Label, $suffix) -ForegroundColor $color
         }
         Write-Host ''
-        Write-Host '  [A] All   [N] None   [Enter] Proceed   [C] Cancel' -ForegroundColor Cyan
+        Write-Host '  [A] All detected   [N] None   [Enter] Proceed   [C] Cancel' -ForegroundColor Cyan
         $choice = Read-Host 'Toggle by number, or pick an action'
         if ($null -eq $choice) { $choice = '' }
         $choice = $choice.Trim()
 
         if ($choice -eq '' ) { $done = $true; break }
         switch -Regex ($choice) {
-            '^[aA]$'       { foreach ($it in $items) { if ($it.Detected) { $state[$it.Key] = $true } } ; break }
-            '^[nN]$'       { foreach ($it in $items) { $state[$it.Key] = $false } ; break }
-            '^[cC]$'       { Write-Host 'Cancelled.' -ForegroundColor Yellow; exit 0 }
-            '^\d+$'        {
+            '^[aA]$' {
+                # "All" respects manifest: pre-existing items stay off unless
+                # the user explicitly toggles them by number.
+                foreach ($it in $items) {
+                    if ($manifestHeld.ContainsKey($it.Key)) { continue }
+                    if ($it.Detected) { $state[$it.Key] = $true }
+                }
+                break
+            }
+            '^[nN]$' { foreach ($it in $items) { $state[$it.Key] = $false } ; break }
+            '^[cC]$' { Write-Host 'Cancelled.' -ForegroundColor Yellow; exit 0 }
+            '^\d+$'  {
                 $n = [int]$choice
                 if ($n -ge 1 -and $n -le $items.Count) {
                     $k = $items[$n - 1].Key
+                    if ($manifestHeld.ContainsKey($k) -and -not $state[$k]) {
+                        Write-Host "    WARNING: '$($items[$n-1].Label)' was already on this machine before our installer ran." -ForegroundColor Yellow
+                        Write-Host "    Toggling it ON will uninstall software the user had previously." -ForegroundColor Yellow
+                    }
                     $state[$k] = -not $state[$k]
                 } else {
                     Write-Warn2 "Out of range: $n"
                 }
             }
-            default        { Write-Warn2 "Unrecognized input: '$choice'" }
+            default  { Write-Warn2 "Unrecognized input: '$choice'" }
         }
     }
 
@@ -327,6 +435,12 @@ function Invoke-ComponentPicker {
 Write-Host ''
 Write-Host 'Copilot CLI + WorkIQ + Azure CLI uninstaller' -ForegroundColor White
 Write-Host '--------------------------------------------' -ForegroundColor DarkGray
+
+# Load install manifest (written by install.ps1). Presence of a component
+# with state 'already-present' or 'already-registered' means the user had
+# it before our installer ran, so the uninstaller will default to KEEPing
+# it even if it is currently detected on the machine.
+Load-Manifest
 
 # Interactive component picker. Runs before elevation so the user's choices
 # can be forwarded into the elevated child as -Keep* flags. Skipped when
@@ -420,17 +534,20 @@ if (Get-Command winget -ErrorAction SilentlyContinue) {
             $copilotHasLeftovers = [bool](Get-ChildItem -Path $copilotPackagesRoot -Directory -Filter 'GitHub.Copilot_*' -ErrorAction SilentlyContinue | Select-Object -First 1)
         }
         $hint = if ($copilotHasLeftovers) { 'leftover portable files detected, will scrub in next step' } else { $null }
-        Uninstall-WingetPackage -Id 'GitHub.Copilot' -Friendly 'GitHub Copilot CLI' -LeftoverHint $hint
+        Uninstall-WingetPackage -Id 'GitHub.Copilot' -Friendly 'GitHub Copilot CLI' -LeftoverHint $hint -ManifestKey 'copilot'
     }
-    if ($KeepAzure)   { Write-Skip 'Azure CLI kept (-KeepAzure)' }     else { Uninstall-WingetPackage -Id 'Microsoft.AzureCLI'  -Friendly 'Azure CLI' }
-    if ($KeepGh)      { Write-Skip 'GitHub CLI kept (-KeepGh)' }        else { Uninstall-WingetPackage -Id 'GitHub.cli'         -Friendly 'GitHub CLI' }
-    if ($KeepNode)    { Write-Skip 'Node.js LTS kept (-KeepNode)' }     else { Uninstall-WingetPackage -Id 'OpenJS.NodeJS.LTS'  -Friendly 'Node.js LTS' }
-    if ($KeepGit)     { Write-Skip 'Git kept (-KeepGit)' }              else { Uninstall-WingetPackage -Id 'Git.Git'            -Friendly 'Git' }
+    if ($KeepAzure)   { Write-Skip 'Azure CLI kept (-KeepAzure)' }     else { Uninstall-WingetPackage -Id 'Microsoft.AzureCLI'  -Friendly 'Azure CLI'  -ManifestKey 'az' }
+    if ($KeepGh)      { Write-Skip 'GitHub CLI kept (-KeepGh)' }        else { Uninstall-WingetPackage -Id 'GitHub.cli'         -Friendly 'GitHub CLI' -ManifestKey 'gh' }
+    if ($KeepNode)    { Write-Skip 'Node.js LTS kept (-KeepNode)' }     else { Uninstall-WingetPackage -Id 'OpenJS.NodeJS.LTS'  -Friendly 'Node.js LTS' -ManifestKey 'node' }
+    if ($KeepGit)     { Write-Skip 'Git kept (-KeepGit)' }              else { Uninstall-WingetPackage -Id 'Git.Git'            -Friendly 'Git'         -ManifestKey 'git' }
 }
 
 Write-Step 'Copilot CLI portable leftovers'
 if ($KeepCopilot) { Write-Skip 'Copilot leftovers kept (-KeepCopilot)' }
 else { Remove-CopilotPortableLeftovers }
+
+# Persist remaining manifest entries (or delete the file if nothing is left).
+Save-Manifest
 
 Write-Host "`n============================================" -ForegroundColor DarkGray
 Write-Host 'Uninstall summary'                                -ForegroundColor White
