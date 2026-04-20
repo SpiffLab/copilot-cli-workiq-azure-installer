@@ -1,0 +1,12 @@
+# Logs / transcripts
+*.log
+install-*.txt
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# PowerShell module cache (if any tests use it)
+/tmp/
