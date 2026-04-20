@@ -24,6 +24,23 @@
 .PARAMETER SkipAzure
     Do not install Azure CLI.
 
+.PARAMETER SkipNode
+    Do not install Node.js LTS.
+
+.PARAMETER SkipGit
+    Do not install Git.
+
+.PARAMETER SkipGh
+    Do not install GitHub CLI (gh).
+
+.PARAMETER SkipCopilot
+    Do not install GitHub Copilot CLI (also forces -SkipWorkIQ since WorkIQ
+    is registered via `copilot mcp add`).
+
+.PARAMETER Yes
+    Skip the interactive component picker at the start and install everything
+    (respecting any -Skip* flags). Useful for CI / unattended runs.
+
 .PARAMETER Force
     Continue past non-fatal errors where reasonable.
 
@@ -35,6 +52,11 @@ param(
     [switch]$SkipAuth,
     [switch]$SkipWorkIQ,
     [switch]$SkipAzure,
+    [switch]$SkipNode,
+    [switch]$SkipGit,
+    [switch]$SkipGh,
+    [switch]$SkipCopilot,
+    [switch]$Yes,
     [switch]$Force,
     [switch]$NoWait
 )
@@ -351,6 +373,80 @@ function Invoke-Auth {
 }
 
 # ---------------------------------------------------------------------------
+# Interactive component picker
+# ---------------------------------------------------------------------------
+
+function Invoke-InstallPicker {
+    $items = @(
+        [pscustomobject]@{ Key='node';   Label='Node.js LTS (required by Copilot CLI / WorkIQ MCP)'; Probe='node'; SkipFlag='SkipNode';    CurrentSkip=$SkipNode }
+        [pscustomobject]@{ Key='git';    Label='Git';                                                 Probe='git';  SkipFlag='SkipGit';     CurrentSkip=$SkipGit }
+        [pscustomobject]@{ Key='gh';     Label='GitHub CLI (gh)';                                     Probe='gh';   SkipFlag='SkipGh';      CurrentSkip=$SkipGh }
+        [pscustomobject]@{ Key='az';     Label='Azure CLI';                                           Probe='az';   SkipFlag='SkipAzure';   CurrentSkip=$SkipAzure }
+        [pscustomobject]@{ Key='copilot';Label='GitHub Copilot CLI';                                  Probe='copilot'; SkipFlag='SkipCopilot'; CurrentSkip=$SkipCopilot }
+        [pscustomobject]@{ Key='workiq'; Label='Register WorkIQ MCP server with Copilot CLI';         Probe=$null;  SkipFlag='SkipWorkIQ';  CurrentSkip=$SkipWorkIQ }
+        [pscustomobject]@{ Key='auth';   Label='Run `gh auth login` at the end';                      Probe=$null;  SkipFlag='SkipAuth';    CurrentSkip=$SkipAuth }
+    )
+
+    # Default: install/enable unless the user already passed -Skip* for it.
+    $state = @{}
+    foreach ($it in $items) { $state[$it.Key] = -not $it.CurrentSkip }
+
+    function Format-PresenceNote {
+        param($item)
+        if (-not $item.Probe) { return '' }
+        $present = [bool](Get-Command -Name $item.Probe -ErrorAction SilentlyContinue)
+        if ($present) { return ' (already present — will be skipped)' } else { return '' }
+    }
+
+    $done = $false
+    while (-not $done) {
+        Write-Host ''
+        Write-Host 'The installer will set up the following:' -ForegroundColor White
+        Write-Host '  [x] = will run   [ ] = will be skipped' -ForegroundColor DarkGray
+        Write-Host ''
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $it = $items[$i]
+            $mark = if ($state[$it.Key]) { 'x' } else { ' ' }
+            $note = Format-PresenceNote $it
+            $color = if ($note) { 'DarkGray' } else { 'White' }
+            Write-Host ("  {0}. [{1}] {2}{3}" -f ($i + 1), $mark, $it.Label, $note) -ForegroundColor $color
+        }
+        Write-Host ''
+        Write-Host '  [A] All   [N] None   [Enter] Proceed   [C] Cancel' -ForegroundColor Cyan
+        $choice = Read-Host 'Toggle by number, or pick an action'
+        if ($null -eq $choice) { $choice = '' }
+        $choice = $choice.Trim()
+
+        if ($choice -eq '') { $done = $true; break }
+        switch -Regex ($choice) {
+            '^[aA]$' { foreach ($it in $items) { $state[$it.Key] = $true } ; break }
+            '^[nN]$' { foreach ($it in $items) { $state[$it.Key] = $false } ; break }
+            '^[cC]$' { Write-Host 'Cancelled.' -ForegroundColor Yellow; exit 0 }
+            '^\d+$' {
+                $n = [int]$choice
+                if ($n -ge 1 -and $n -le $items.Count) {
+                    $k = $items[$n - 1].Key
+                    $state[$k] = -not $state[$k]
+                } else {
+                    Write-Host "[!!] Out of range: $n" -ForegroundColor Yellow
+                }
+            }
+            default { Write-Host "[!!] Unrecognized input: '$choice'" -ForegroundColor Yellow }
+        }
+    }
+
+    return @{
+        SkipNode    = -not $state['node']
+        SkipGit     = -not $state['git']
+        SkipGh      = -not $state['gh']
+        SkipAzure   = -not $state['az']
+        SkipCopilot = -not $state['copilot']
+        SkipWorkIQ  = -not $state['workiq']
+        SkipAuth    = -not $state['auth']
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -359,19 +455,65 @@ function Main {
     Write-Host 'Copilot CLI + WorkIQ + Azure CLI installer' -ForegroundColor White
     Write-Host '------------------------------------------' -ForegroundColor DarkGray
 
-    Test-Preflight
-
-    Write-Step 'Prerequisites (winget)'
-    Install-WingetPackage -Id 'OpenJS.NodeJS.LTS' -Friendly 'Node.js LTS' -ProbeCommand 'node'
-    Install-WingetPackage -Id 'Git.Git'           -Friendly 'Git'          -ProbeCommand 'git'
-    Install-WingetPackage -Id 'GitHub.cli'        -Friendly 'GitHub CLI'   -ProbeCommand 'gh'
-    if (-not $SkipAzure) {
-        Install-WingetPackage -Id 'Microsoft.AzureCLI' -Friendly 'Azure CLI' -ProbeCommand 'az'
-    } else {
-        Write-Skip 'Azure CLI skipped (-SkipAzure)'
+    # Interactive component picker (skippable via -Yes or in non-console hosts).
+    $interactive = (-not $Yes) -and ($Host.Name -eq 'ConsoleHost') -and [Environment]::UserInteractive
+    if ($interactive) {
+        try {
+            $picked = Invoke-InstallPicker
+            $script:SkipNode    = [bool]$picked.SkipNode
+            $script:SkipGit     = [bool]$picked.SkipGit
+            $script:SkipGh      = [bool]$picked.SkipGh
+            $script:SkipAzure   = [bool]$picked.SkipAzure
+            $script:SkipCopilot = [bool]$picked.SkipCopilot
+            $script:SkipWorkIQ  = [bool]$picked.SkipWorkIQ
+            $script:SkipAuth    = [bool]$picked.SkipAuth
+            # Propagate into the param-scope variables the functions read.
+            Set-Variable -Name SkipNode    -Scope 1 -Value $script:SkipNode
+            Set-Variable -Name SkipGit     -Scope 1 -Value $script:SkipGit
+            Set-Variable -Name SkipGh      -Scope 1 -Value $script:SkipGh
+            Set-Variable -Name SkipAzure   -Scope 1 -Value $script:SkipAzure
+            Set-Variable -Name SkipCopilot -Scope 1 -Value $script:SkipCopilot
+            Set-Variable -Name SkipWorkIQ  -Scope 1 -Value $script:SkipWorkIQ
+            Set-Variable -Name SkipAuth    -Scope 1 -Value $script:SkipAuth
+        } catch {
+            Write-Warn2 "Picker failed ($($_.Exception.Message)); continuing with current flags."
+        }
     }
 
-    Install-CopilotCli
+    # Skipping Copilot means WorkIQ cannot be registered via `copilot mcp add`.
+    if ($SkipCopilot -and -not $SkipWorkIQ) {
+        Write-Warn2 'SkipCopilot implies SkipWorkIQ (WorkIQ registers via the Copilot CLI). Skipping WorkIQ.'
+        Set-Variable -Name SkipWorkIQ -Scope 1 -Value $true
+    }
+
+    Test-Preflight
+
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor Yellow
+    Write-Host '  UAC prompts may appear'                                     -ForegroundColor Yellow
+    Write-Host '  Some MSI packages (Git, Azure CLI, GitHub CLI) trigger a'   -ForegroundColor Yellow
+    Write-Host '  Windows UAC dialog during install. If the installer seems'  -ForegroundColor Yellow
+    Write-Host '  to hang, check the taskbar - Windows sometimes puts the'    -ForegroundColor Yellow
+    Write-Host '  UAC prompt behind other windows. Click "Yes" to continue.'  -ForegroundColor Yellow
+    Write-Host '============================================================' -ForegroundColor Yellow
+    Write-Host ''
+
+    Write-Step 'Prerequisites (winget)'
+    if ($SkipNode) { Write-Skip 'Node.js LTS skipped (-SkipNode)' }
+    else { Install-WingetPackage -Id 'OpenJS.NodeJS.LTS' -Friendly 'Node.js LTS' -ProbeCommand 'node' }
+    if ($SkipGit)  { Write-Skip 'Git skipped (-SkipGit)' }
+    else { Install-WingetPackage -Id 'Git.Git'           -Friendly 'Git'          -ProbeCommand 'git' }
+    if ($SkipGh)   { Write-Skip 'GitHub CLI skipped (-SkipGh)' }
+    else { Install-WingetPackage -Id 'GitHub.cli'        -Friendly 'GitHub CLI'   -ProbeCommand 'gh' }
+    if ($SkipAzure) {
+        Write-Skip 'Azure CLI skipped (-SkipAzure)'
+    } else {
+        Install-WingetPackage -Id 'Microsoft.AzureCLI' -Friendly 'Azure CLI' -ProbeCommand 'az'
+    }
+
+    if ($SkipCopilot) { Write-Skip 'GitHub Copilot CLI skipped (-SkipCopilot)' }
+    else { Install-CopilotCli }
+
     Register-WorkIQMcp
     Invoke-Auth
 

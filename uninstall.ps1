@@ -342,8 +342,17 @@ if ($interactive) {
 # When invoked via `irm ... | iex` the script has no $PSCommandPath, so
 # we fall back to re-downloading from the same URL when elevation is needed.
 if (-not (Test-IsAdmin) -and -not $NoElevate) {
-    Write-Warn2 'Not running elevated. MSI uninstalls (Node.js, Git, gh, az) require admin.'
-    Write-Info  'Relaunching elevated via UAC... (pass -NoElevate to skip)'
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor Yellow
+    Write-Host '  UAC prompt incoming'                                         -ForegroundColor Yellow
+    Write-Host '  A Windows UAC dialog is about to open asking for admin'     -ForegroundColor Yellow
+    Write-Host '  permission. If you do not see it, check the taskbar -'      -ForegroundColor Yellow
+    Write-Host '  Windows sometimes puts it behind other windows.'            -ForegroundColor Yellow
+    Write-Host '  Click "Yes" to continue. MSI uninstalls (Node, Git, gh,'    -ForegroundColor Yellow
+    Write-Host '  az) require admin rights to run.'                           -ForegroundColor Yellow
+    Write-Host '============================================================' -ForegroundColor Yellow
+    Write-Host ''
+    Write-Info 'Relaunching elevated via UAC... (pass -NoElevate to skip)'
 
     # Forward the original switches so the elevated run matches user intent.
     $forwarded = @('-Yes')   # picker already ran pre-elevation; don't re-prompt
