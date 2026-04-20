@@ -18,9 +18,20 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location -Path $PSScriptRoot
 
-if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-    throw "GitHub CLI (gh) not found. Install with: winget install --id GitHub.cli -e"
+# Locate gh: PATH first, then a portable copy we may have downloaded into the user profile.
+$ghCmd = (Get-Command gh -ErrorAction SilentlyContinue)?.Source
+if (-not $ghCmd) {
+    $portable = Join-Path $env:USERPROFILE 'gh-portable\bin\gh.exe'
+    if (Test-Path $portable) { $ghCmd = $portable }
 }
+if (-not $ghCmd) {
+    Write-Host 'Installing GitHub CLI via winget...' -ForegroundColor Cyan
+    winget install --id GitHub.cli --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Null
+    $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+    $ghCmd = (Get-Command gh -ErrorAction SilentlyContinue)?.Source
+}
+if (-not $ghCmd) { throw 'Could not install GitHub CLI. Install manually: winget install --id GitHub.cli -e' }
+Set-Alias -Name gh -Value $ghCmd -Scope Script
 
 # Ensure gh is authenticated
 gh auth status 2>$null
