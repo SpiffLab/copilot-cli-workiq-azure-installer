@@ -110,8 +110,9 @@ function Remove-NpmCopilotLeftover {
         "${env:ProgramFiles(x86)}\nodejs\npm.cmd",
         "$env:APPDATA\npm\npm.cmd"
     ) | Where-Object { Test-Path $_ }
+    $npmCandidates = @($npmCandidates)  # force array so [0] is the full path, not the first character
 
-    if ($npmCandidates) {
+    if ($npmCandidates.Count -gt 0) {
         $npmCmd = $npmCandidates[0]
         Write-Info "Running: $npmCmd uninstall -g @github/copilot"
         & $npmCmd uninstall -g '@github/copilot' 2>&1 |
