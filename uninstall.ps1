@@ -87,10 +87,18 @@ function Test-IsAdmin {
 }
 
 function Uninstall-WingetPackage {
-    param([string]$Id, [string]$Friendly)
+    param(
+        [string]$Id,
+        [string]$Friendly,
+        [string]$LeftoverHint   # optional message when winget has no record (e.g., Copilot portable files)
+    )
     $listed = winget list --id $Id --exact --accept-source-agreements 2>$null | Out-String
     if ($listed -notmatch [regex]::Escape($Id)) {
-        Write-Skip "$Friendly not installed (winget: $Id)"
+        if ($LeftoverHint) {
+            Write-Skip "$Friendly not registered with winget - $LeftoverHint"
+        } else {
+            Write-Skip "$Friendly not installed (winget: $Id)"
+        }
         return
     }
     Write-Info "Uninstalling $Friendly ($Id)..."
@@ -403,7 +411,17 @@ Remove-NpmPrefixFromUserPath
 
 Write-Step 'winget uninstalls'
 if (Get-Command winget -ErrorAction SilentlyContinue) {
-    if ($KeepCopilot) { Write-Skip 'GitHub Copilot CLI kept (-KeepCopilot)' } else { Uninstall-WingetPackage -Id 'GitHub.Copilot' -Friendly 'GitHub Copilot CLI' }
+    if ($KeepCopilot) {
+        Write-Skip 'GitHub Copilot CLI kept (-KeepCopilot)'
+    } else {
+        $copilotPackagesRoot = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+        $copilotHasLeftovers = $false
+        if (Test-Path $copilotPackagesRoot) {
+            $copilotHasLeftovers = [bool](Get-ChildItem -Path $copilotPackagesRoot -Directory -Filter 'GitHub.Copilot_*' -ErrorAction SilentlyContinue | Select-Object -First 1)
+        }
+        $hint = if ($copilotHasLeftovers) { 'leftover portable files detected, will scrub in next step' } else { $null }
+        Uninstall-WingetPackage -Id 'GitHub.Copilot' -Friendly 'GitHub Copilot CLI' -LeftoverHint $hint
+    }
     if ($KeepAzure)   { Write-Skip 'Azure CLI kept (-KeepAzure)' }     else { Uninstall-WingetPackage -Id 'Microsoft.AzureCLI'  -Friendly 'Azure CLI' }
     if ($KeepGh)      { Write-Skip 'GitHub CLI kept (-KeepGh)' }        else { Uninstall-WingetPackage -Id 'GitHub.cli'         -Friendly 'GitHub CLI' }
     if ($KeepNode)    { Write-Skip 'Node.js LTS kept (-KeepNode)' }     else { Uninstall-WingetPackage -Id 'OpenJS.NodeJS.LTS'  -Friendly 'Node.js LTS' }
