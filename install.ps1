@@ -71,6 +71,31 @@ function Test-CommandExists {
     [bool](Get-Command -Name $Name -ErrorAction SilentlyContinue)
 }
 
+function Resolve-NativeCommand {
+    <#
+    Resolves a command name to a path, preferring .cmd / .exe / .bat over .ps1.
+    This avoids ExecutionPolicy issues: PowerShell's default command resolution
+    picks up *.ps1 shims (e.g., npm.ps1, copilot.ps1) which fail on systems
+    where unsigned PS scripts are blocked. Batch / executable shims bypass PS
+    execution policy entirely.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+
+    $preferredExts = @('.cmd', '.exe', '.bat', '.com')
+    foreach ($ext in $preferredExts) {
+        $candidate = Get-Command -Name "$Name$ext" -ErrorAction SilentlyContinue |
+                     Where-Object { $_.CommandType -in 'Application','ExternalScript' } |
+                     Select-Object -First 1
+        if ($candidate) { return $candidate.Source }
+    }
+    # Fall back to whatever Get-Command finds (may be a .ps1 — caller should be aware).
+    $fallback = Get-Command -Name $Name -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandType -eq 'Application' } |
+                Select-Object -First 1
+    if ($fallback) { return $fallback.Source }
+    return $null
+}
+
 function Update-SessionPath {
     # Refresh PATH in the current session from Machine + User scopes so that
     # freshly-installed tools (winget, npm globals, etc.) become available
@@ -171,18 +196,32 @@ function Install-WingetPackage {
 function Install-CopilotCli {
     Write-Step 'GitHub Copilot CLI'
 
-    if (Test-CommandExists 'copilot') {
-        Write-Skip "Copilot CLI already on PATH ($(copilot --version 2>$null | Select-Object -First 1))"
+    # Resolve npm to its .cmd / .exe form to bypass PowerShell ExecutionPolicy
+    # (PS would otherwise pick up npm.ps1 and fail on restricted systems).
+    $npmCmd = Resolve-NativeCommand -Name 'npm'
+    if (-not $npmCmd) {
+        # Try common install paths directly.
+        foreach ($p in @(
+            "$env:ProgramFiles\nodejs\npm.cmd",
+            "${env:ProgramFiles(x86)}\nodejs\npm.cmd",
+            "$env:APPDATA\npm\npm.cmd"
+        )) { if (Test-Path $p) { $npmCmd = $p; break } }
+    }
+    if (-not $npmCmd) {
+        throw "npm.cmd not found after installing Node.js. Open a new terminal and re-run, or install Node LTS manually."
+    }
+    Write-Info "Using npm: $npmCmd"
+
+    # Check for existing copilot shim (prefer .cmd to avoid ExecutionPolicy issues).
+    $copilotCmd = Resolve-NativeCommand -Name 'copilot'
+    if ($copilotCmd) {
+        $ver = (& $copilotCmd --version 2>&1 | Select-Object -First 1)
+        Write-Skip "Copilot CLI already present at $copilotCmd ($ver)"
         return
     }
 
-    if (-not (Test-CommandExists 'npm')) {
-        throw "npm not found after installing Node.js. Open a new terminal and re-run, or install Node LTS manually."
-    }
-
     Write-Info 'npm install -g @github/copilot'
-    # Capture npm output so failures are visible in the transcript log.
-    $npmOut = & npm install -g '@github/copilot' 2>&1
+    $npmOut = & $npmCmd install -g '@github/copilot' 2>&1
     $npmExit = $LASTEXITCODE
     $npmOut | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
     if ($npmExit -ne 0) {
@@ -191,13 +230,11 @@ function Install-CopilotCli {
         return
     }
 
-    # Resolve npm global prefix and ensure its bin directory is on PATH for both
-    # the current session AND persistently (User scope) so new terminals see it.
+    # Resolve npm global prefix (again via .cmd, not .ps1).
     $npmPrefix = $null
-    try { $npmPrefix = (& npm config get prefix 2>$null | Select-Object -First 1).Trim() } catch { }
+    try { $npmPrefix = (& $npmCmd config get prefix 2>$null | Select-Object -First 1).Trim() } catch { }
 
     if ($npmPrefix -and (Test-Path $npmPrefix)) {
-        # On Windows, `npm -g` installs shim .cmd files directly in the prefix folder.
         if ($env:Path -notlike "*$npmPrefix*") { $env:Path = "$npmPrefix;$env:Path" }
 
         # Persist to User PATH so new shells see it.
@@ -215,23 +252,24 @@ function Install-CopilotCli {
         }
     }
 
-    # Verify the binary is actually where we expect.
+    # Locate the produced shim, preferring .cmd (works under any ExecutionPolicy).
     $copilotShim = $null
     if ($npmPrefix) {
-        foreach ($name in 'copilot.cmd','copilot.ps1','copilot') {
+        foreach ($name in 'copilot.cmd','copilot.exe','copilot.bat') {
             $candidate = Join-Path $npmPrefix $name
             if (Test-Path $candidate) { $copilotShim = $candidate; break }
         }
     }
 
-    if (Test-CommandExists 'copilot') {
-        $ver = (copilot --version 2>&1 | Select-Object -First 1)
-        Write-Ok "Copilot CLI installed ($ver)"
-    } elseif ($copilotShim) {
-        Write-Ok "Copilot CLI installed at $copilotShim"
-        Write-Warn2 'Not visible on PATH in THIS session — open a NEW PowerShell window, then run: copilot'
+    if ($copilotShim) {
+        $ver = (& $copilotShim --version 2>&1 | Select-Object -First 1)
+        Write-Ok "Copilot CLI installed at $copilotShim ($ver)"
+        $script:CopilotPath = $copilotShim
+        if (-not (Resolve-NativeCommand -Name 'copilot')) {
+            Write-Warn2 'Not visible on PATH in THIS session (persisted for new terminals). Open a NEW PowerShell window, then run: copilot'
+        }
     } else {
-        Write-Fail "npm reported success but 'copilot' shim not found under $npmPrefix. See log: $script:LogPath"
+        Write-Fail "npm reported success but 'copilot.cmd' shim not found under $npmPrefix. See log: $script:LogPath"
         if (-not $Force) { throw "Copilot CLI install did not produce a usable binary." }
     }
 }
@@ -249,19 +287,23 @@ function Register-WorkIQMcp {
     }
 
     $cliOk = $false
-    if (Test-CommandExists 'copilot') {
-        # Try the documented `copilot mcp add` form. Syntax varies by version;
-        # if it fails we fall through to the JSON-config method.
+    # Prefer the resolved .cmd shim (set by Install-CopilotCli) to bypass
+    # ExecutionPolicy issues with copilot.ps1.
+    $copilotCmd = $null
+    if (Test-Path variable:script:CopilotPath) { $copilotCmd = $script:CopilotPath }
+    if (-not $copilotCmd) { $copilotCmd = Resolve-NativeCommand -Name 'copilot' }
+
+    if ($copilotCmd) {
         try {
-            Write-Info 'copilot mcp add workiq -- npx -y @microsoft/workiq@latest mcp'
-            $code = Invoke-External -File 'copilot' -Arguments @(
-                'mcp', 'add', 'workiq', '--',
-                'npx', '-y', '@microsoft/workiq@latest', 'mcp'
-            ) -AllowFail
-            if ($code -eq 0) { $cliOk = $true }
+            Write-Info "$copilotCmd mcp add workiq -- npx -y @microsoft/workiq@latest mcp"
+            & $copilotCmd mcp add workiq -- npx -y '@microsoft/workiq@latest' mcp 2>&1 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+            if ($LASTEXITCODE -eq 0) { $cliOk = $true }
+            else { Write-Info "copilot mcp add exited $LASTEXITCODE; falling back to config file." }
         } catch {
             Write-Info "copilot mcp add did not succeed ($($_.Exception.Message)); falling back to config file."
         }
+    } else {
+        Write-Info 'copilot binary not resolvable in this session; using config-file fallback.'
     }
 
     if ($cliOk) {

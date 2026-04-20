@@ -74,6 +74,12 @@ Try: *"What are my upcoming meetings this week?"* — that exercises WorkIQ.
   # then open a NEW PowerShell window
   ```
   Verify with: `Get-Command copilot` and `Test-Path (Join-Path (npm config get prefix) 'copilot.cmd')`.
+- **PowerShell ExecutionPolicy / "running scripts is disabled on this system".**
+  The `irm | iex` entry point is immune (code runs in memory, not from a
+  `.ps1` file). The installer also explicitly invokes `.cmd` / `.exe` shims
+  for `npm` and `copilot` so it works under the default `Restricted` and
+  `AllSigned` policies without any changes. You do **not** need
+  `Set-ExecutionPolicy`.
 - **`winget` not found.** Update "App Installer" from the Microsoft Store
   (Windows 10 1809+ and Windows 11 ship with winget).
 - **Execution policy errors.** `irm | iex` runs in-memory and usually isn't
