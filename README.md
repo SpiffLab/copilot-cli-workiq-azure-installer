@@ -7,7 +7,39 @@ and the [Azure CLI](https://learn.microsoft.com/cli/azure/).
 
 ## Quick start
 
-Open PowerShell and run:
+### Never used PowerShell before? Start here.
+
+PowerShell is the command-line tool that comes built in to every modern version
+of Windows. **You don't need to download anything** — it's already on your PC.
+
+**How to open it:**
+
+1. Press the **Windows key** on your keyboard (or click the Start menu).
+2. Type **`powershell`** — a result called **Windows PowerShell** will appear at the top.
+3. **Right-click** it and choose **"Run as administrator"**.
+   *(When Windows asks "Do you want to allow this app to make changes to your device?", click **Yes**.)*
+4. A dark-blue (or black) window will open with a blinking cursor. That's PowerShell.
+   You'll see something like:
+
+   ```
+   PS C:\Users\YourName>
+   ```
+
+5. Copy the command in the grey box below and paste it into that window
+   (right-click inside the window to paste, or press **Ctrl+V**), then press **Enter**.
+
+> 📘 Microsoft has a walkthrough with screenshots here:
+> <https://learn.microsoft.com/en-us/powershell/scripting/windows-powershell/starting-windows-powershell>
+
+> ⚠️ **Heads up:** During install, Windows will pop up a **User Account Control (UAC)**
+> prompt asking *"Do you want to allow this app to make changes to your device?"*.
+> **Click Yes.** Sometimes Windows hides this prompt behind other windows —
+> if nothing seems to be happening, check your **taskbar** for a flashing blue-and-white
+> shield icon and click it to bring the prompt forward.
+
+### Run this one command
+
+Open PowerShell (see above) and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/SpiffLab/copilot-cli-workiq-azure-installer/main/install.ps1 | iex
@@ -48,19 +80,17 @@ Because `irm | iex` doesn't support script parameters, wrap it in a scriptblock:
 
 ## Uninstall
 
-To remove everything this script installed:
+Open PowerShell **as administrator** (see the "Never used PowerShell before?"
+section above — same steps). Then run:
 
 ```powershell
 irm https://raw.githubusercontent.com/SpiffLab/copilot-cli-workiq-azure-installer/main/uninstall.ps1 | iex
 ```
 
-The uninstaller:
-
-- Removes the `workiq` entry from your Copilot CLI MCP config.
-- Uninstalls (via winget) Copilot CLI, Azure CLI, GitHub CLI, Node.js LTS,
-  and Git.
-- Cleans up any leftover `@github/copilot` from older npm-based install
-  attempts and removes `%APPDATA%\npm` from your User PATH if it was added.
+You'll be shown a checklist and can choose which tools to remove. Tools you
+already had on your machine *before* running our installer are automatically
+protected — the uninstaller will keep them by default, and only touches things
+it actually installed.
 
 Flags to keep specific tools (useful for install/uninstall round-tripping
 during development):
