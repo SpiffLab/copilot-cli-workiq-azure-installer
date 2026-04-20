@@ -159,6 +159,53 @@ function Test-IsAdmin {
     } catch { return $false }
 }
 
+# Run winget quietly with a clean animated progress bar instead of letting
+# winget's spinner + UTF-8 progress chars pollute the console.
+function Invoke-WingetQuiet {
+    param(
+        [Parameter(Mandatory)][string]$Activity,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $logDir  = Join-Path $env:TEMP 'copilot-cli-workiq-azure-installer'
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    $stamp   = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+    $stdout  = Join-Path $logDir "winget-$stamp.out.log"
+    $stderr  = Join-Path $logDir "winget-$stamp.err.log"
+
+    $proc = Start-Process -FilePath 'winget' -ArgumentList $Arguments `
+        -NoNewWindow -PassThru `
+        -RedirectStandardOutput $stdout `
+        -RedirectStandardError  $stderr
+
+    $start  = Get-Date
+    $frames = @('|','/','-','\')
+    $i = 0
+    try {
+        while (-not $proc.HasExited) {
+            $elapsed = [int]((Get-Date) - $start).TotalSeconds
+            $status  = "{0}  elapsed {1:00}:{2:00}" -f $frames[$i % $frames.Length], [math]::Floor($elapsed/60), ($elapsed % 60)
+            $hint = ''
+            if (Test-Path $stdout) {
+                $lastLine = Get-Content -LiteralPath $stdout -Tail 1 -ErrorAction SilentlyContinue
+                if ($lastLine) { $hint = ($lastLine -replace '[\u2580-\u259F\u2500-\u257F]', '').Trim() }
+            }
+            if ($hint) { $status = "$status  -  $hint" }
+            Write-Progress -Activity $Activity -Status $status -PercentComplete -1
+            Start-Sleep -Milliseconds 250
+            $i++
+        }
+    } finally {
+        Write-Progress -Activity $Activity -Completed
+    }
+
+    return [pscustomobject]@{
+        ExitCode  = $proc.ExitCode
+        StdoutLog = $stdout
+        StderrLog = $stderr
+    }
+}
+
 function Uninstall-WingetPackage {
     param(
         [string]$Id,
@@ -180,9 +227,10 @@ function Uninstall-WingetPackage {
     # Note: intentionally NOT using --disable-interactivity. Some packages
     # (Azure CLI MSI, Git MSI) require admin; blocking UAC causes silent
     # failures. We self-elevate in Main so UAC shouldn't pop again here.
-    winget uninstall --id $Id --exact --silent --accept-source-agreements 2>&1 |
-        ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
-    $code = $LASTEXITCODE
+    $result = Invoke-WingetQuiet -Activity "Uninstalling $Friendly" -Arguments @(
+        'uninstall', '--id', $Id, '--exact', '--silent', '--accept-source-agreements'
+    )
+    $code = $result.ExitCode
 
     # Re-check to confirm removal. winget sometimes returns 0 even when the
     # package is still registered (e.g., another installer scope owns it).
@@ -192,6 +240,11 @@ function Uninstall-WingetPackage {
         if ($ManifestKey) { Remove-ManifestComponent -Key $ManifestKey }
     } elseif ($code -ne 0) {
         Write-Fail "$Friendly uninstall exited $code (still registered with winget)"
+        Write-Fail "See log: $($result.StdoutLog)"
+        try {
+            $tail = Get-Content -LiteralPath $result.StdoutLog -Tail 8 -ErrorAction SilentlyContinue
+            if ($tail) { $tail | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray } }
+        } catch { }
     } else {
         Write-Warn2 "$Friendly still registered after winget uninstall (may require admin or manual removal)"
     }

@@ -183,6 +183,57 @@ function Invoke-External {
     return $code
 }
 
+# Run winget quietly with a clean animated progress bar instead of letting
+# winget's spinner + UTF-8 progress chars pollute the console. Output is
+# captured to a log file which we read back on completion to report the tail
+# (and surface it on failure).
+function Invoke-WingetQuiet {
+    param(
+        [Parameter(Mandatory)][string]$Activity,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+
+    $logDir  = Join-Path $env:TEMP 'copilot-cli-workiq-azure-installer'
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+    $stamp   = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+    $stdout  = Join-Path $logDir "winget-$stamp.out.log"
+    $stderr  = Join-Path $logDir "winget-$stamp.err.log"
+
+    $proc = Start-Process -FilePath 'winget' -ArgumentList $Arguments `
+        -NoNewWindow -PassThru `
+        -RedirectStandardOutput $stdout `
+        -RedirectStandardError  $stderr
+
+    $start  = Get-Date
+    $frames = @('|','/','-','\')
+    $i = 0
+    try {
+        while (-not $proc.HasExited) {
+            $elapsed = [int]((Get-Date) - $start).TotalSeconds
+            $status  = "{0}  elapsed {1:00}:{2:00}" -f $frames[$i % $frames.Length], [math]::Floor($elapsed/60), ($elapsed % 60)
+            # Tail the last non-empty output line for a hint at what winget is doing.
+            $hint = ''
+            if (Test-Path $stdout) {
+                $lastLine = Get-Content -LiteralPath $stdout -Tail 1 -ErrorAction SilentlyContinue
+                if ($lastLine) { $hint = ($lastLine -replace '[\u2580-\u259F\u2500-\u257F]', '').Trim() }
+            }
+            if ($hint) { $status = "$status  -  $hint" }
+            Write-Progress -Activity $Activity -Status $status -PercentComplete -1
+            Start-Sleep -Milliseconds 250
+            $i++
+        }
+    } finally {
+        Write-Progress -Activity $Activity -Completed
+    }
+
+    $code = $proc.ExitCode
+    return [pscustomobject]@{
+        ExitCode  = $code
+        StdoutLog = $stdout
+        StderrLog = $stderr
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Pre-flight checks
 # ---------------------------------------------------------------------------
@@ -239,13 +290,15 @@ function Install-WingetPackage {
     }
 
     Write-Info "Installing $Friendly ($Id) via winget..."
-    $code = Invoke-External -File 'winget' -Arguments @(
+    $wingetArgs = @(
         'install', '--id', $Id, '--exact',
         '--silent',
         '--accept-package-agreements',
         '--accept-source-agreements',
         '--disable-interactivity'
-    ) -AllowFail:$Force.IsPresent
+    )
+    $result = Invoke-WingetQuiet -Activity "Installing $Friendly" -Arguments $wingetArgs
+    $code = $result.ExitCode
     Update-SessionPath
 
     # winget occasionally returns non-zero exit codes (reboot-required, benign
@@ -268,6 +321,12 @@ function Install-WingetPackage {
         if ($ManifestKey) { Set-ManifestComponent -Key $ManifestKey -State 'installed' -Id $Id }
     } else {
         Write-Warn2 "$Friendly winget install exited $code"
+        Write-Warn2 "See log: $($result.StdoutLog)"
+        # Surface the last few lines of the winget log to help diagnose failures.
+        try {
+            $tail = Get-Content -LiteralPath $result.StdoutLog -Tail 8 -ErrorAction SilentlyContinue
+            if ($tail) { $tail | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray } }
+        } catch { }
         if ($ManifestKey) { Set-ManifestComponent -Key $ManifestKey -State 'failed' -Id $Id }
     }
 }
