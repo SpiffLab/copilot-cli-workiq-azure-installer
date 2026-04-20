@@ -83,14 +83,14 @@ $script:Manifest     = $null   # hashtable of component -> @{state; id; at}
 function Get-ManifestState {
     param([Parameter(Mandatory)][string]$Key)
     if (-not $script:Manifest) { return $null }
-    if (-not $script:Manifest.ContainsKey($Key)) { return $null }
+    if (-not $script:Manifest.Contains($Key)) { return $null }
     return $script:Manifest[$Key].state
 }
 
 function Remove-ManifestComponent {
     param([Parameter(Mandatory)][string]$Key)
     if (-not $script:Manifest) { return }
-    if ($script:Manifest.ContainsKey($Key)) { $script:Manifest.Remove($Key) }
+    if ($script:Manifest.Contains($Key)) { $script:Manifest.Remove($Key) }
 }
 
 function Load-Manifest {
@@ -429,7 +429,7 @@ function Invoke-ComponentPicker {
             $mark = if ($state[$it.Key]) { 'x' } else { ' ' }
             $color = if ($it.Detected) { 'White' } else { 'DarkGray' }
             $suffix = ''
-            if ($manifestHeld.ContainsKey($it.Key)) { $suffix = ' (*)  pre-existing' ; $color = 'DarkYellow' }
+            if ($manifestHeld.Contains($it.Key)) { $suffix = ' (*)  pre-existing' ; $color = 'DarkYellow' }
             elseif (-not $it.Detected) { $suffix = ' (not detected)' }
             Write-Host ("  {0}. [{1}] {2}{3}" -f ($i + 1), $mark, $it.Label, $suffix) -ForegroundColor $color
         }
@@ -445,7 +445,7 @@ function Invoke-ComponentPicker {
                 # "All" respects manifest: pre-existing items stay off unless
                 # the user explicitly toggles them by number.
                 foreach ($it in $items) {
-                    if ($manifestHeld.ContainsKey($it.Key)) { continue }
+                    if ($manifestHeld.Contains($it.Key)) { continue }
                     if ($it.Detected) { $state[$it.Key] = $true }
                 }
                 break
@@ -456,7 +456,7 @@ function Invoke-ComponentPicker {
                 $n = [int]$choice
                 if ($n -ge 1 -and $n -le $items.Count) {
                     $k = $items[$n - 1].Key
-                    if ($manifestHeld.ContainsKey($k) -and -not $state[$k]) {
+                    if ($manifestHeld.Contains($k) -and -not $state[$k]) {
                         Write-Host "    WARNING: '$($items[$n-1].Label)' was already on this machine before our installer ran." -ForegroundColor Yellow
                         Write-Host "    Toggling it ON will uninstall software the user had previously." -ForegroundColor Yellow
                     }
