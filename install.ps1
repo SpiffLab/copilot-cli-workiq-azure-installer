@@ -16,13 +16,13 @@
         & ([scriptblock]::Create((irm https://raw.githubusercontent.com/<owner>/copilot-cli-workiq-azure-installer/main/install.ps1))) -SkipAuth
 
 .PARAMETER SkipAuth
-    Do not run `gh auth login` or `az login` at the end.
+    Do not run `gh auth login` at the end.
 
 .PARAMETER SkipWorkIQ
     Install tooling only; do not register the WorkIQ MCP server with Copilot CLI.
 
 .PARAMETER SkipAzure
-    Do not install Azure CLI or run `az login`.
+    Do not install Azure CLI.
 
 .PARAMETER Force
     Continue past non-fatal errors where reasonable.
@@ -345,26 +345,9 @@ function Invoke-Auth {
         Write-Warn2 'gh not on PATH; skipping GitHub auth. Open a new shell and run `gh auth login`.'
     }
 
-    # Azure
-    if ($SkipAzure) {
-        Write-Skip 'Azure auth skipped (-SkipAzure)'
-    } elseif (Test-CommandExists 'az') {
-        $azSignedIn = $false
-        try {
-            az account show *> $null
-            if ($LASTEXITCODE -eq 0) { $azSignedIn = $true }
-        } catch { }
-
-        if ($azSignedIn) {
-            Write-Skip 'az already signed in'
-        } else {
-            Write-Info 'Launching `az login`...'
-            try { Invoke-External -File 'az' -Arguments @('login') -AllowFail | Out-Null; Write-Ok 'az signed in' }
-            catch { Write-Warn2 "az login failed or was cancelled: $($_.Exception.Message)" }
-        }
-    } else {
-        Write-Warn2 'az not on PATH; skipping Azure auth. Open a new shell and run `az login`.'
-    }
+    # Azure CLI is installed but intentionally NOT signed in here. Users run
+    # `az login` themselves when they're ready to deploy.
+    Write-Skip 'az login skipped by design (run `az login` yourself when needed)'
 }
 
 # ---------------------------------------------------------------------------

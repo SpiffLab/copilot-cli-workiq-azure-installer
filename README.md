@@ -23,7 +23,7 @@ That's it. The script will:
    - **GitHub CLI (`gh`)** — used for authenticating your GitHub account so Copilot CLI can talk to GitHub. Also handy for creating repos, PRs, issues from the terminal.
    - **Azure CLI (`az`)** — for building and managing Azure resources.
 3. Register the WorkIQ MCP server with Copilot CLI.
-4. Run `gh auth login --web` and `az login` interactively.
+4. Run `gh auth login --web` interactively so Copilot CLI can talk to GitHub. (`az login` is intentionally **not** run — sign in when you're ready to deploy.)
 5. Print a summary and next steps.
 
 Anything already present is skipped — re-running is safe.
@@ -40,10 +40,43 @@ Because `irm | iex` doesn't support script parameters, wrap it in a scriptblock:
 
 | Flag           | Effect                                                              |
 | -------------- | ------------------------------------------------------------------- |
-| `-SkipAuth`    | Don't run `gh auth login` or `az login` at the end.                 |
+| `-SkipAuth`    | Don't run `gh auth login` at the end.                               |
 | `-SkipWorkIQ`  | Install tooling only; don't register the WorkIQ MCP server.         |
-| `-SkipAzure`   | Don't install Azure CLI and don't run `az login`.                   |
+| `-SkipAzure`   | Don't install Azure CLI.                                            |
 | `-Force`       | Continue past non-fatal errors where reasonable.                    |
+| `-NoWait`      | Skip the final "Press Enter to close" pause.                        |
+
+## Uninstall
+
+To remove everything this script installed:
+
+```powershell
+irm https://raw.githubusercontent.com/SpiffLab/copilot-cli-workiq-azure-installer/main/uninstall.ps1 | iex
+```
+
+The uninstaller:
+
+- Removes the `workiq` entry from your Copilot CLI MCP config.
+- Uninstalls (via winget) Copilot CLI, Azure CLI, GitHub CLI, Node.js LTS,
+  and Git.
+- Cleans up any leftover `@github/copilot` from older npm-based install
+  attempts and removes `%APPDATA%\npm` from your User PATH if it was added.
+
+Flags to keep specific tools (useful for install/uninstall round-tripping
+during development):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/SpiffLab/copilot-cli-workiq-azure-installer/main/uninstall.ps1))) -KeepGit -KeepNode -KeepGh
+```
+
+| Flag                 | Effect                                                      |
+| -------------------- | ----------------------------------------------------------- |
+| `-KeepNode`          | Don't uninstall Node.js LTS.                                |
+| `-KeepGit`           | Don't uninstall Git.                                        |
+| `-KeepGh`            | Don't uninstall GitHub CLI.                                 |
+| `-KeepAzure`         | Don't uninstall Azure CLI.                                  |
+| `-KeepWorkIQConfig`  | Don't remove the WorkIQ entry from the MCP config.          |
+| `-NoWait`            | Skip the final "Press Enter to close" pause.                |
 
 ## After install
 
